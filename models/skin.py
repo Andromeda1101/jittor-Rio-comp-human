@@ -61,8 +61,64 @@ class SimpleSkinModel(nn.Module):
         return res
 
 
+import jsparse.nn as spnn
+from PCT.networks.jts.pct import PointTransformer3
+
+class JSMLP(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.encoder = nn.Sequential(
+            spnn.Linear(input_dim, 512),
+            spnn.BatchNorm(512),
+            spnn.ReLU(),
+            spnn.Linear(512, output_dim),
+            spnn.BatchNorm(output_dim),
+            spnn.ReLU(),
+        )
+    
+    def execute(self, x):
+        B = x.shape[0]
+        return self.encoder(x.reshape(-1, self.input_dim)).reshape(B, -1, self.output_dim)
+
+class JSSkinModel(nn.Module):
+
+    def __init__(self, feat_dim: int, num_joints: int):
+        super().__init__()
+        self.num_joints = num_joints
+        self.feat_dim = feat_dim
+
+        self.pct = PointTransformer3(output_channels=feat_dim)
+        self.joint_mlp = JSMLP(3 + feat_dim, feat_dim)
+        self.vertex_mlp = JSMLP(3 + feat_dim, feat_dim)
+        self.relu = spnn.ReLU()
+    
+    def execute(self, vertices: jt.Var, joints: jt.Var):
+        # (B, latents)
+        shape_latent = self.relu(self.pct(vertices.permute(0, 2, 1)))
+
+        # (B, N, latents)
+        vertices_latent = (
+            self.vertex_mlp(concat([vertices, shape_latent.unsqueeze(1).repeat(1, vertices.shape[1], 1)], dim=-1))
+        )
+
+        # (B, num_joints, latents)
+        joints_latent = (
+            self.joint_mlp(concat([joints, shape_latent.unsqueeze(1).repeat(1, self.num_joints, 1)], dim=-1))
+        )
+
+        # (B, N, num_joints)
+        res = nn.softmax(vertices_latent @ joints_latent.permute(0, 2, 1) / sqrt(self.feat_dim), dim=-1)
+        assert not jt.isnan(res).any()
+
+        return res
+
 # Factory function to create models
 def create_model(model_name='pct', feat_dim=256, **kwargs):
     if model_name == "pct":
         return SimpleSkinModel(feat_dim=feat_dim, num_joints=22)
+    else:
+        if model_name == "jspct":
+            return JSSkinModel(feat_dim=feat_dim, num_joints=22)
     raise NotImplementedError()

@@ -27,8 +27,33 @@ class SimpleSkeletonModel(nn.Module):
         x = self.transformer(vertices)
         return self.mlp(x)
 
+import jsparse.nn as spnn
+from PCT.networks.jts.pct import PointTransformer3
+
+class JSSkeletonModel(nn.Module):
+    def __init__(self, feat_dim: int, output_channels: int):
+        super().__init__()
+        self.feat_dim           = feat_dim
+        self.output_channels    = output_channels
+        
+        self.transformer = PointTransformer3(output_channels=feat_dim)
+        self.mlp = nn.Sequential(
+            spnn.Linear(feat_dim, 512),
+            spnn.BatchNorm(512),
+            spnn.ReLU(),
+            spnn.Linear(512, output_channels),
+        )
+    
+    def execute(self, vertices: jt.Var):
+        x = self.transformer(vertices)
+        return self.mlp(x)
+
+
 # Factory function to create models
 def create_model(model_name='pct', output_channels=66, **kwargs):
     if model_name == "pct":
         return SimpleSkeletonModel(feat_dim=256, output_channels=output_channels)
+    else:
+        if model_name == "jspct":
+            return JSSkeletonModel(feat_dim=256, output_channels=output_channels)
     raise NotImplementedError()

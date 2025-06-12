@@ -4,6 +4,7 @@ import os
 import argparse
 import time
 import random
+import wandb
 
 from jittor import nn
 from jittor import optim
@@ -25,6 +26,13 @@ def train(args):
     Args:
         args: Command line arguments
     """
+    # Initialize wandb
+    wandb.init(
+        project="rio-skeleton",
+        config=vars(args),
+        name=f"skeleton_{args.model_name}_{args.model_type}"
+    )
+    
     # Create output directory if it doesn't exist
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -91,6 +99,7 @@ def train(args):
     
     # Training loop
     best_loss = 99999999
+    no_improve_epochs = 0  # Counter for early stopping
     for epoch in range(args.epochs):
         # Training phase
         model.train()
@@ -128,6 +137,13 @@ def train(args):
                    f"Train Loss: {train_loss:.4f} "
                    f"Time: {epoch_time:.2f}s "
                    f"LR: {optimizer.lr:.6f}")
+        
+        # Log training metrics
+        wandb.log({
+            "train_loss": train_loss,
+            "epoch": epoch + 1,
+            "learning_rate": optimizer.lr
+        })
 
         # Validation phase
         if val_loader is not None and (epoch + 1) % args.val_freq == 0:
@@ -168,12 +184,25 @@ def train(args):
             
             log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f}")
             
+            # Log validation metrics
+            wandb.log({
+                "val_loss": val_loss,
+                "J2J_loss": J2J_loss,
+                "epoch": epoch + 1
+            })
+            
             # Save best model
             if J2J_loss < best_loss:
                 best_loss = J2J_loss
                 model_path = os.path.join(args.output_dir, 'best_model.pkl')
                 model.save(model_path)
                 log_message(f"Saved best model with loss {best_loss:.4f} to {model_path}")
+                no_improve_epochs = 0  # Reset counter
+            else:
+                no_improve_epochs += 1
+                if no_improve_epochs >= args.patience:
+                    log_message(f"Early stopping triggered after {epoch+1} epochs")
+                    break
         
         # Save checkpoint
         if (epoch + 1) % args.save_freq == 0:
@@ -186,6 +215,9 @@ def train(args):
     model.save(final_model_path)
     log_message(f"Training completed. Saved final model to {final_model_path}")
     
+    # Close wandb run
+    wandb.finish()
+    
     return model, best_loss
 
 def main():
@@ -193,9 +225,9 @@ def main():
     parser = argparse.ArgumentParser(description='Train a point cloud model')
     
     # Dataset parameters
-    parser.add_argument('--train_data_list', type=str, required=True,
+    parser.add_argument('--train_data_list', type=str, default='data/train_list.txt',# required=True,
                         help='Path to the training data list file')
-    parser.add_argument('--val_data_list', type=str, default='',
+    parser.add_argument('--val_data_list', type=str, default='data/val_list.txt',
                         help='Path to the validation data list file')
     parser.add_argument('--data_root', type=str, default='data',
                         help='Root directory for the data files')
@@ -234,6 +266,10 @@ def main():
                         help='Save frequency')
     parser.add_argument('--val_freq', type=int, default=1,
                         help='Validation frequency')
+    
+    # Add early stopping parameter
+    parser.add_argument('--patience', type=int, default=10,
+                        help='Number of epochs to wait for improvement before early stopping')
     
     args = parser.parse_args()
     
