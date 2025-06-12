@@ -10,7 +10,7 @@ from jittor.misc import _pair, _triple
 from jsparse import SparseTensor
 from jsparse.nn import functional as F
 
-__all__ = ['Conv3d', 'Conv1d']
+__all__ = ['Conv3d']
 
 class Conv3d(nn.Module):
 
