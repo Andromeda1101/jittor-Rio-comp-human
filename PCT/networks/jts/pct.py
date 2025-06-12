@@ -11,18 +11,12 @@ from PCT.misc.ops import knn_point, index_points
 def sample_and_group(npoint, nsample, xyz, points):
     B, N, C = xyz.shape
     S = npoint 
-    # xyz = xyz.contiguous()
     sampler = FurthestPointSampler(npoint)
     _, fps_idx = sampler(xyz) # [B, npoint]
-    # print ('fps size=', fps_idx.size())
-    # fps_idx = sampler(xyz).long() # [B, npoint]
     new_xyz = index_points(xyz, fps_idx) 
     new_points = index_points(points, fps_idx)
-    # new_xyz = xyz[:]
-    # new_points = points[:]
 
     idx = knn_point(nsample, xyz, new_xyz)
-    #idx = query_ball_point(radius, nsample, xyz, new_xyz)
     grouped_xyz = index_points(xyz, idx) # [B, npoint, nsample, C]
     grouped_xyz_norm = grouped_xyz - new_xyz.view(B, S, 1, C)
     grouped_points = index_points(points, idx)
@@ -30,66 +24,59 @@ def sample_and_group(npoint, nsample, xyz, points):
     new_points = concat([grouped_points_norm, new_points.view(B, S, 1, -1).repeat(1, 1, nsample, 1)], dim=-1)
     return new_xyz, new_points
 
+class Local_op(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(Local_op, self).__init__()
+        self.conv1 = spnn.Conv3d(in_channels, out_channels, kernel_size=1)
+        self.conv2 = spnn.Conv3d(out_channels, out_channels, kernel_size=1)
+        self.bn1 = spnn.BatchNorm(out_channels)
+        self.bn2 = spnn.BatchNorm(out_channels)
+        self.relu = spnn.ReLU()
+
+    def execute(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        return x
+
 class SparseTransformerBlock(nn.Module):
     def __init__(self, in_channels, out_channels, npoint=512, nsample=32):
         super().__init__()
         self.npoint = npoint
         self.nsample = nsample
         
-        # Original sparse convolution layer
-        self.conv1 = spnn.Conv3d(in_channels, out_channels, kernel_size=3, stride=1)
+        # Local feature extraction
+        self.local_op = Local_op(in_channels, out_channels)
+        
+        # Position encoding
+        self.pos_enc = spnn.Conv3d(3, out_channels, kernel_size=1)
+        
+        # Feature transformation
+        self.conv1 = spnn.Conv3d(out_channels, out_channels, kernel_size=3)
         self.bn1 = spnn.BatchNorm(out_channels)
         self.relu = spnn.ReLU()
-        
-        # Self-attention mechanism
-        self.q_conv = spnn.Conv3d(out_channels, out_channels//4, kernel_size=1)
-        self.k_conv = spnn.Conv3d(out_channels, out_channels//4, kernel_size=1)
-        self.v_conv = spnn.Conv3d(out_channels, out_channels, kernel_size=1)
-        
-        self.after_norm = spnn.BatchNorm(out_channels)
-        self.act = spnn.ReLU()
-        
-        # Add point cloud sampling and local feature extraction
-        self.local_sa = nn.Sequential(
-            spnn.Conv3d(out_channels*2, out_channels, 1),
-            spnn.BatchNorm(out_channels),
-            spnn.ReLU()
-        )
 
     def execute(self, x, coord):
-        # Sparse convolution processing
-        x_sparse = self.relu(self.bn1(self.conv1(x)))
+        # Local feature learning
+        local_feat = self.local_op(x)
         
-        # Point cloud local feature extraction
+        # Position encoding
+        pos_feat = self.pos_enc(coord)
+        
+        # Combine features
+        x = local_feat + pos_feat
+        x = self.relu(self.bn1(self.conv1(x)))
+        
+        # Sample and group
         new_coord, grouped_feat = sample_and_group(
-            self.npoint, self.nsample, 
-            coord, x_sparse.features
+            self.npoint, self.nsample,
+            coord, x.features
         )
         
-        # Merge features
-        local_feat = self.local_sa(grouped_feat)
-        
-        # Convert back to sparse tensor
-        x = SparseTensor(
-            features=local_feat,
-            indices=new_coord,
+        return SparseTensor(
+            values=grouped_feat,
+            indices=new_coord.int(),
             size=x.size
-        )
-        
-        # Self-attention
-        q = self.q_conv(x)
-        k = self.k_conv(x)
-        v = self.v_conv(x)
-        
-        # Compute attention scores
-        attention = spnn.sparse_matmul(q, k.transpose())
-        attention = jt.nn.softmax(attention, dim=-1)
-        
-        # Apply attention
-        out = spnn.sparse_matmul(attention, v)
-        out = self.act(self.after_norm(out))
-        
-        return x + out, new_coord
+        ), new_coord
 
 class PointTransformer3(nn.Module):
     def __init__(self, output_channels=40):
@@ -102,16 +89,21 @@ class PointTransformer3(nn.Module):
             spnn.ReLU()
         )
         
-        # Modify transformer blocks to support point cloud sampling
+        # Enhanced transformer blocks
         self.transformer1 = SparseTransformerBlock(64, 128, npoint=512, nsample=32)
         self.transformer2 = SparseTransformerBlock(128, 256, npoint=256, nsample=32)
         self.transformer3 = SparseTransformerBlock(256, 512, npoint=128, nsample=32)
         
-        # Global pooling and classification
-        self.global_pool = spnn.GlobalPool(op="max")
+        # Add feature fusion
+        self.conv_fuse = nn.Sequential(
+            spnn.Conv3d(896, 1024, kernel_size=1),
+            spnn.BatchNorm(1024),
+            spnn.ReLU()
+        )
         
+        # Global pooling and classification
         self.classifier = nn.Sequential(
-            spnn.Linear(512, 256),
+            spnn.Linear(1024, 256),
             spnn.BatchNorm(256),
             spnn.ReLU(),
             spnn.Dropout(p=0.5),
@@ -123,32 +115,24 @@ class PointTransformer3(nn.Module):
         )
 
     def execute(self, x):
-        # x is [B, C, N] from permute(0, 2, 1), need to match Simple model
+        # x is [B, C, N] from permute(0, 2, 1)
         batch_size = x.shape[0]
         num_points = x.shape[2]
         
         # Convert point cloud to SparseTensor
         coords = x.permute(0, 2, 1)  # [B, N, 3]
         
-        # Process each batch item
-        sparse_tensors = []
-        for i in range(batch_size):
-            points = coords[i]  # [N, 3]
-            
-            # Normalize coordinates to positive values
-            points = points - points.min(dim=0)[0]
-            
-            # Create sparse tensor
-            coords_i = jt.concat([jt.ones(num_points, 1) * i, points], dim=1)
-            sparse_tensor = SparseTensor(
-                values=points,
-                indices=coords_i.int(),
-                size=(batch_size, *[100]*3)  # Use appropriate spatial size
-            )
-            sparse_tensors.append(sparse_tensor)
+        # Create single sparse tensor for whole batch
+        batch_ids = jt.arange(batch_size).reshape(-1, 1).repeat(1, num_points).reshape(-1, 1)
+        points = coords.reshape(-1, 3)
+        indices = jt.concat([batch_ids, points], dim=1)
         
-        # Combine batch
-        x = SparseTensor.cat(sparse_tensors)
+        # Create sparse tensor
+        x = SparseTensor(
+            values=points,
+            indices=indices.int(),
+            size=(batch_size, *[100]*3)
+        )
 
         # Network forward
         x = self.stem(x)
@@ -156,10 +140,21 @@ class PointTransformer3(nn.Module):
         x, coord = self.transformer2(x, coord)
         x, coord = self.transformer3(x, coord)
         
-        # Global pooling to get [B, C] format
-        x = self.global_pool(x)
+        # Feature fusion
+        features = x.features
+        batch_indices = x.indices[:, 0]
+        pooled_features = []
         
-        # Classification to match output format
-        x = self.classifier(x)  # Output shape: [B, output_channels]
+        for i in range(batch_size):
+            batch_mask = (batch_indices == i)
+            if batch_mask.sum() > 0:
+                batch_features = features[batch_mask]
+                pooled_features.append(jt.max(batch_features, dim=0))
         
-        return x  # Return [B, output_channels] to match Simple model
+        x = jt.stack(pooled_features)
+        x = self.conv_fuse(x)
+        
+        # Classification
+        x = self.classifier(x)
+        
+        return x
