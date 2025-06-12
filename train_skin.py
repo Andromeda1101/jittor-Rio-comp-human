@@ -27,11 +27,11 @@ def train(args):
         args: Command line arguments
     """
     # Initialize wandb
-    wandb.init(
-        project="rio-skin",
-        config=vars(args),
-        name=f"skin_{args.model_name}"
-    )
+    # wandb.init(
+    #     project="rio-skin",
+    #     config=vars(args),
+    #     name=f"skin_{args.model_name}"
+    # )
     
     # Create output directory if it doesn't exist
     if not os.path.exists(args.output_dir):
@@ -143,12 +143,12 @@ def train(args):
                    f"LR: {optimizer.lr:.6f}")
         
         # Log training metrics
-        wandb.log({
-            "train_loss_mse": train_loss_mse,
-            "train_loss_l1": train_loss_l1,
-            "epoch": epoch + 1,
-            "learning_rate": optimizer.lr
-        })
+        # wandb.log({
+        #     "train_loss_mse": train_loss_mse,
+        #     "train_loss_l1": train_loss_l1,
+        #     "epoch": epoch + 1,
+        #     "learning_rate": optimizer.lr
+        # })
 
         # Validation phase
         if val_loader is not None and (epoch + 1) % args.val_freq == 0:
@@ -185,11 +185,11 @@ def train(args):
             log_message(f"Validation Loss: mse: {val_loss_mse:.4f} l1: {val_loss_l1:.4f}")
             
             # Log validation metrics
-            wandb.log({
-                "val_loss_mse": val_loss_mse,
-                "val_loss_l1": val_loss_l1,
-                "epoch": epoch + 1
-            })
+            # wandb.log({
+            #     "val_loss_mse": val_loss_mse,
+            #     "val_loss_l1": val_loss_l1,
+            #     "epoch": epoch + 1
+            # })
             
             # Save best model
             if val_loss_l1 < best_loss:
@@ -216,7 +216,7 @@ def train(args):
     log_message(f"Training completed. Saved final model to {final_model_path}")
     
     # Close wandb run
-    wandb.finish()
+    # wandb.finish()
     
     return model, best_loss
 
@@ -234,7 +234,7 @@ def main():
     
     # Model parameters
     parser.add_argument('--model_name', type=str, default='pct',
-                        choices=['pct', 'pct2', 'custom_pct', 'skeleton'],
+                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct'],
                         help='Model architecture to use')
     parser.add_argument('--model_type', type=str, default='standard',
                         choices=['standard', 'enhanced'],
