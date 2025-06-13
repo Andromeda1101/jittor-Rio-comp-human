@@ -9,7 +9,6 @@ import sys
 from PCT.networks.cls.pct import Point_Transformer, Point_Transformer2, Point_Transformer_Last, SA_Layer, Local_op, sample_and_group
 
 class SimpleSkeletonModel(nn.Module):
-    
     def __init__(self, feat_dim: int, output_channels: int):
         super().__init__()
         self.feat_dim           = feat_dim
@@ -20,6 +19,45 @@ class SimpleSkeletonModel(nn.Module):
             nn.Linear(feat_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
+            nn.Linear(512, output_channels),
+        )
+    
+    def execute(self, vertices: jt.Var):
+        x = self.transformer(vertices)
+        return self.mlp(x)
+
+class SimpleSkeletonModel2(nn.Module):
+    def __init__(self, feat_dim: int, output_channels: int):
+        super().__init__()
+        self.feat_dim           = feat_dim
+        self.output_channels    = output_channels
+        
+        self.transformer = Point_Transformer2(output_channels=feat_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(feat_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, output_channels),
+        )
+    
+    def execute(self, vertices: jt.Var):
+        x = self.transformer(vertices)
+        return self.mlp(x)
+
+from PCT.networks.cls.enhancedpct import EnhancedPointTransformer
+
+class EnhancedSkeletonModel(nn.Module):
+    def __init__(self, feat_dim: int, output_channels: int):
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.output_channels = output_channels
+        
+        self.transformer = EnhancedPointTransformer(output_channels=feat_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
             nn.Linear(512, output_channels),
         )
     
@@ -53,7 +91,10 @@ class JSSkeletonModel(nn.Module):
 def create_model(model_name='pct', output_channels=66, **kwargs):
     if model_name == "pct":
         return SimpleSkeletonModel(feat_dim=256, output_channels=output_channels)
-    else:
-        if model_name == "jspct":
-            return JSSkeletonModel(feat_dim=256, output_channels=output_channels)
+    elif model_name == "jspct":
+        return JSSkeletonModel(feat_dim=256, output_channels=output_channels)
+    elif model_name == "pct2":
+        return SimpleSkeletonModel2(feat_dim=256, output_channels=output_channels)
+    elif model_name == "enhanced":
+        return EnhancedSkeletonModel(feat_dim=256, output_channels=output_channels)
     raise NotImplementedError()
