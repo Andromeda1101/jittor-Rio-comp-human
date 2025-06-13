@@ -54,7 +54,7 @@ class EnhancedSkeletonModel(nn.Module):
         
         self.transformer = EnhancedPointTransformer(output_channels=feat_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(1024, 512),
+            nn.Linear(feat_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(p=0.5),
