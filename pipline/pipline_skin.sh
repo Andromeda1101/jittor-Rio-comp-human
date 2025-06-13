@@ -1,2 +1,0 @@
-python train_skin.py --train_data_list data/train_list.txt --val_data_list data/val_list.txt --data_root data --model_name jspct --output_dir output/skin
-python predict_skin.py --predict_data_list data/test_list.txt --data_root data --model_name jspct --pretrained_model output/skin/best_model.pkl --predict_output_dir predict --batch_size 16
