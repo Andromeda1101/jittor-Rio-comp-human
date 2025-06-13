@@ -189,3 +189,9 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 data
+
+JSparse/
+jsparse/
+output**/
+predict**/
+**/**/**/*.npy
