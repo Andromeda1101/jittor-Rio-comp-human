@@ -108,14 +108,23 @@ class LocalFeatureAggregation(nn.Module):
         k = self.conv_k(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
         v = self.conv_v(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
         
+        # 修复维度不匹配问题
         # 为每个点找到k个最近邻
-        k = index_points(k.permute(0,2,3,1), idx).permute(0,3,1,2)  # [B, G, N, k]
-        v = index_points(v.permute(0,2,3,1), idx).permute(0,3,1,2)  # [B, G, N, k]
+        k = k.permute(0, 2, 3, 1)  # [B, C/G, N, G]
+        k = index_points(k, idx)    # [B, C/G, N, k, G]
+        k = k.permute(0, 4, 1, 2, 3)  # [B, G, C/G, N, k]
+        
+        v = v.permute(0, 2, 3, 1)  # [B, C/G, N, G]
+        v = index_points(v, idx)    # [B, C/G, N, k, G]
+        v = v.permute(0, 4, 1, 2, 3)  # [B, G, C/G, N, k]
+        
+        # 位置编码加到值特征上
+        pos_emb = pos_emb.view(batch_size, self.groups, self.channels_per_group, num_points, self.k)
+        v = v + pos_emb  # 添加位置信息
         
         # Reshape for attention computation
         q = q.unsqueeze(-1)  # [B, G, C/G, N, 1]
-        k = k.unsqueeze(2)   # [B, G, 1, N, k]
-        v = v.unsqueeze(2)   # [B, G, 1, N, k]
+        k = k.unsqueeze(2)   # [B, G, 1, N, k] 
         
         # Compute attention scores
         energy = (q * k).sum(2) / jt.sqrt(float(self.channels_per_group))  # [B, G, N, k]
@@ -132,41 +141,53 @@ class LocalFeatureAggregation(nn.Module):
 class AdaptiveLayerFusion(nn.Module):
     def __init__(self, channels, num_layers):
         super().__init__()
+        self.num_layers = num_layers
         self.conv_weights = nn.Conv1d(channels, num_layers, 1)
         
     def execute(self, features):
+        # 检查所有特征图尺寸相同
+        assert all(feat.shape == features[0].shape for feat in features), "All features must have same shape"
+        
         # 计算自适应权重
-        x = concat(features, dim=1)
         weights = nn.softmax(self.conv_weights(features[-1]), dim=1)
         
         # 加权融合
         out = 0
-        for i, feat in enumerate(features):
-            out += feat * weights[:, i:i+1]
+        for i in range(self.num_layers):
+            out += features[i] * weights[:, i:i+1]
         return out
 
 class LayerAttention(nn.Module):
     def __init__(self, channels, num_layers):
         super().__init__()
+        self.channels = channels
+        self.num_layers = num_layers
         self.attention = nn.Sequential(
             nn.Conv1d(channels * num_layers, channels, 1),
             nn.BatchNorm1d(channels),
             nn.ReLU(),
-            nn.Conv1d(channels, channels * num_layers, 1),
+            nn.Conv1d(channels, num_layers, 1),
             nn.Sigmoid()
         )
         
     def execute(self, x):
-        weights = self.attention(x)
-        return x * weights
+        # x 是融合后的特征图 [B, C, N]
+        # 需要扩展为 [B, C*L, N] 用于注意力计算
+        expanded = x.repeat(1, self.num_layers, 1)  # [B, C*L, N]
+        
+        # 计算注意力权重
+        weights = self.attention(expanded)  # [B, L, N]
+        weights = weights.view(-1, self.num_layers, 1)  # [B, L, 1]
+        
+        # 加权特征
+        weighted = x.unsqueeze(1) * weights.unsqueeze(2)  # [B, L, C, N]
+        return weighted.view(-1, self.channels * self.num_layers, x.size(2))
 
 if __name__ == '__main__':
     
     jt.flags.use_cuda=1
     input_points = init.gauss((16, 3, 1024), dtype='float32')  # B, D, N 
 
-
     network = EnhancedPointTransformer()
     out_logits = network(input_points)
     print (out_logits.shape)
-
