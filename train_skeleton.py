@@ -70,8 +70,35 @@ def train(args):
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
     
-    # Create loss function
-    criterion = nn.MSELoss()
+    # Create loss functions
+    criterion_mse = nn.MSELoss()
+    
+    def bone_length_loss(pred, target, parents):
+        """Calculate bone length consistency loss"""
+        pred = pred.reshape(-1, 22, 3)
+        target = target.reshape(-1, 22, 3)
+        
+        pred_bones = pred[:, 1:] - jt.gather(pred, 1, jt.array([parents[1:]]).repeat(3).reshape(1, -1, 3))
+        target_bones = target[:, 1:] - jt.gather(target, 1, jt.array([parents[1:]]).repeat(3).reshape(1, -1, 3))
+        
+        pred_lengths = jt.norm(pred_bones, dim=2)
+        target_lengths = jt.norm(target_bones, dim=2)
+        
+        return nn.mse_loss(pred_lengths, target_lengths)
+    
+    def symmetry_loss(pred, parents):
+        """Calculate left-right symmetry loss"""
+        pred = pred.reshape(-1, 22, 3)
+        # Define symmetric joint pairs (example indices)
+        symmetric_pairs = [(1,4), (2,5), (3,6)] # Add your actual symmetric joint pairs
+        
+        loss = 0
+        for left, right in symmetric_pairs:
+            left_bone = pred[:, left] - jt.gather(pred, 1, jt.array([[parents[left]]]).repeat(3).reshape(1, 1, 3))
+            right_bone = pred[:, right] - jt.gather(pred, 1, jt.array([[parents[right]]]).repeat(3).reshape(1, 1, 3))
+            loss += nn.mse_loss(jt.abs(left_bone), jt.abs(right_bone))
+            
+        return loss
     
     # Create dataloaders
     train_loader = get_dataloader(
@@ -114,7 +141,14 @@ def train(args):
 
             outputs = model(vertices)
             joints = joints.reshape(outputs.shape[0], -1)
-            loss = criterion(outputs, joints)
+            
+            # Calculate losses
+            mse_loss = criterion_mse(outputs, joints)
+            bone_loss = bone_length_loss(outputs, joints, parents) 
+            sym_loss = symmetry_loss(outputs, parents)
+            
+            # Combined loss with weights
+            loss = mse_loss + 0.5 * bone_loss + 0.1 * sym_loss
             
             # Backward pass and optimize
             optimizer.zero_grad()
@@ -163,7 +197,7 @@ def train(args):
                 
                 # Forward pass
                 outputs = model(vertices)
-                loss = criterion(outputs, joints)
+                loss = criterion_mse(outputs, joints)
                 
                 # export render results
                 if batch_idx == show_id:

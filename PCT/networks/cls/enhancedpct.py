@@ -81,6 +81,7 @@ class LocalFeatureAggregation(nn.Module):
         super().__init__()
         self.k = k
         self.groups = groups
+        self.channels_per_group = channels // groups
         
         self.conv_q = nn.Conv1d(channels, channels, 1, groups=groups)
         self.conv_k = nn.Conv1d(channels, channels, 1, groups=groups) 
@@ -96,20 +97,32 @@ class LocalFeatureAggregation(nn.Module):
         
         # KNN查询
         idx = knn_point(self.k, xyz.permute(0,2,1), xyz.permute(0,2,1))
-        pos_grad = index_points(xyz.permute(0,2,1), idx) - xyz.permute(0,2,1).unsqueeze(2)
+        neighbors = index_points(x.permute(0,2,1), idx)  # [B, N, k, C]
+        pos_grad = index_points(xyz.permute(0,2,1), idx) - xyz.permute(0,2,1).unsqueeze(2)  # [B, N, k, 3]
         
         # 位置编码
-        pos_emb = self.conv_pos(pos_grad.permute(0,3,1,2))
+        pos_emb = self.conv_pos(pos_grad.permute(0,3,1,2))  # [B, C, N, k]
         
         # 多头注意力
-        q = self.conv_q(x).view(batch_size, self.groups, -1, num_points, 1)
-        k = self.conv_k(x).view(batch_size, self.groups, -1, num_points, self.k) 
-        v = self.conv_v(x).view(batch_size, self.groups, -1, num_points, self.k)
+        q = self.conv_q(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
+        k = self.conv_k(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
+        v = self.conv_v(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
         
-        energy = (q * k).sum(2) / np.sqrt(channels // self.groups)
-        attn = nn.softmax(energy, -1)
+        # 为每个点找到k个最近邻
+        k = index_points(k.permute(0,2,3,1), idx).permute(0,3,1,2)  # [B, G, N, k]
+        v = index_points(v.permute(0,2,3,1), idx).permute(0,3,1,2)  # [B, G, N, k]
         
-        x_transformed = (v * attn.unsqueeze(2)).sum(-1)
+        # Reshape for attention computation
+        q = q.unsqueeze(-1)  # [B, G, C/G, N, 1]
+        k = k.unsqueeze(2)   # [B, G, 1, N, k]
+        v = v.unsqueeze(2)   # [B, G, 1, N, k]
+        
+        # Compute attention scores
+        energy = (q * k).sum(2) / jt.sqrt(float(self.channels_per_group))  # [B, G, N, k]
+        attn = nn.softmax(energy, -1)  # [B, G, N, k]
+        
+        # Apply attention to values
+        x_transformed = (v * attn.unsqueeze(2)).sum(-1)  # [B, G, C/G, N]
         x_transformed = x_transformed.view(batch_size, -1, num_points)
         
         # 残差连接

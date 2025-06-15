@@ -67,9 +67,31 @@ def train(args):
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
     
-    # Create loss function
+    # Create loss functions
     criterion_mse = nn.MSELoss()
     criterion_l1 = nn.L1Loss()
+    
+    def spatial_smoothness_loss(pred_weights, vertices):
+        """Calculate spatial smoothness loss for skinning weights"""
+        # Find K nearest neighbors for each vertex
+        K = 6
+        dist = jt.sum((vertices.unsqueeze(2) - vertices.unsqueeze(1)) ** 2, dim=-1)
+        _, nn_idx = jt.topk(dist, k=K+1, dim=-1, largest=False)
+        nn_idx = nn_idx[:, :, 1:]  # Exclude self
+        
+        # Get weights of neighboring vertices
+        batch_size, num_vertices = vertices.shape[:2]
+        neighbor_weights = jt.gather(pred_weights.reshape(batch_size, -1), 1, 
+                                   nn_idx.reshape(batch_size, -1)).reshape(batch_size, num_vertices, K, -1)
+        
+        # Calculate smoothness as variance among neighbors
+        weights_var = jt.var(neighbor_weights, dim=2).mean()
+        return weights_var
+    
+    def sparsity_loss(pred_weights):
+        """Encourage sparse skinning weights"""
+        # L1 regularization on weights
+        return jt.mean(jt.abs(pred_weights))
     
     # Create dataloaders
     train_loader = get_dataloader(
@@ -103,6 +125,8 @@ def train(args):
         model.train()
         train_loss_mse = 0.0
         train_loss_l1 = 0.0
+        train_loss_smooth = 0.0
+        train_loss_sparse = 0.0
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
@@ -113,9 +137,15 @@ def train(args):
             joints: jt.Var
             skin: jt.Var
             outputs = model(vertices, joints)
-            loss_mse = criterion_mse(outputs, skin)
-            loss_l1 = criterion_l1(outputs, skin)
-            loss = loss_mse + loss_l1
+            
+            # Calculate losses
+            mse_loss = criterion_mse(outputs, skin)
+            l1_loss = criterion_l1(outputs, skin)
+            smooth_loss = spatial_smoothness_loss(outputs, vertices)
+            sparse_loss = sparsity_loss(outputs)
+            
+            # Combined loss with weights
+            loss = mse_loss + l1_loss + 0.1 * smooth_loss + 0.01 * sparse_loss
             
             # Backward pass and optimize
             optimizer.zero_grad()
@@ -123,22 +153,29 @@ def train(args):
             optimizer.step()
             
             # Calculate statistics
-            train_loss_mse += loss_mse.item()
-            train_loss_l1 += loss_l1.item()
+            train_loss_mse += mse_loss.item()
+            train_loss_l1 += l1_loss.item()
+            train_loss_smooth += smooth_loss.item()
+            train_loss_sparse += sparse_loss.item()
             
             # Print progress
             if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                           f"Loss mse: {loss_mse.item():.4f} Loss l1: {loss_l1.item():.4f}")
+                           f"Loss mse: {mse_loss.item():.4f} Loss l1: {l1_loss.item():.4f} "
+                           f"Loss smooth: {smooth_loss.item():.4f} Loss sparse: {sparse_loss.item():.4f}")
         
         # Calculate epoch statistics
         train_loss_mse /= len(train_loader)
         train_loss_l1 /= len(train_loader)
+        train_loss_smooth /= len(train_loader)
+        train_loss_sparse /= len(train_loader)
         epoch_time = time.time() - start_time
         
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
                    f"Train Loss mse: {train_loss_mse:.4f} "
                    f"Train Loss l1: {train_loss_l1:.4f} "
+                   f"Train Loss smooth: {train_loss_smooth:.4f} "
+                   f"Train Loss sparse: {train_loss_sparse:.4f} "
                    f"Time: {epoch_time:.2f}s "
                    f"LR: {optimizer.lr:.6f}")
         
@@ -146,6 +183,8 @@ def train(args):
         # wandb.log({
         #     "train_loss_mse": train_loss_mse,
         #     "train_loss_l1": train_loss_l1,
+        #     "train_loss_smooth": train_loss_smooth,
+        #     "train_loss_sparse": train_loss_sparse,
         #     "epoch": epoch + 1,
         #     "learning_rate": optimizer.lr
         # })
