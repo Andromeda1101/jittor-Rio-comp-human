@@ -52,13 +52,18 @@ class EnhancedSkeletonModel(nn.Module):
         self.feat_dim = feat_dim
         self.output_channels = output_channels
         
-        self.transformer = EnhancedPointTransformer(output_channels=feat_dim)
+        self.transformer = EnhancedPointTransformer(output_channels=feat_dim, layers=8)
+        
         self.mlp = nn.Sequential(
             nn.Linear(feat_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(512, output_channels),
+            nn.Dropout(p=0.3),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256), 
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(256, output_channels),
         )
     
     def execute(self, vertices: jt.Var):

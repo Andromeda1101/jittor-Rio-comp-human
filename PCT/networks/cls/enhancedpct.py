@@ -9,15 +9,25 @@ from PCT.misc.ops import knn_point, index_points
 class EnhancedPointTransformer(nn.Module):
     def __init__(self, output_channels=40, layers=8):
         super().__init__()
+
+        # 多尺度特征提取
         self.conv1 = nn.Conv1d(3, 128, kernel_size=1, bias=False)
         self.conv2 = nn.Conv1d(128, 256, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm1d(128)
         self.bn2 = nn.BatchNorm1d(256)
         
-        # 增加SA层数量并添加残差
-        self.sa_layers = nn.ModuleList()
+        # 分层局部特征聚合
+        self.local_sa_layers = nn.ModuleList()
         for i in range(layers):
-            self.sa_layers.append(EnhancedSA_Layer(256))
+            self.local_sa_layers.append(
+                LocalFeatureAggregation(256, k=16, groups=8)
+            )
+        
+        # 自适应层间特征聚合
+        self.adaptive_fusion = AdaptiveLayerFusion(256, layers)
+        
+        # 层注意力
+        self.layer_attention = LayerAttention(256, layers)
         
         # 多尺度特征融合
         self.conv_fuse = nn.Sequential(
@@ -35,7 +45,7 @@ class EnhancedPointTransformer(nn.Module):
         self.dp2 = nn.Dropout(p=0.5)
         self.linear3 = nn.Linear(256, output_channels)
         self.relu = nn.ReLU()
-    
+
     def execute(self, x):
         batch_size, C, N = x.size()
         x_input = x
@@ -44,14 +54,17 @@ class EnhancedPointTransformer(nn.Module):
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.relu(self.bn2(self.conv2(x)))
         
-        # 多级SA处理
-        sa_outputs = []
-        for sa_layer in self.sa_layers:
+        # 分层局部特征聚合
+        local_features = []
+        for sa_layer in self.local_sa_layers:
             x = sa_layer(x, x_input)
-            sa_outputs.append(x)
+            local_features.append(x)
+            
+        # 自适应层间特征聚合
+        x = self.adaptive_fusion(local_features)
         
-        # 多尺度特征融合
-        x = concat(sa_outputs, dim=1)
+        # 层注意力
+        x = self.layer_attention(x)
         x = self.conv_fuse(x)
         x = jt.max(x, 2).view(batch_size, -1)
         
@@ -63,50 +76,76 @@ class EnhancedPointTransformer(nn.Module):
         x = self.linear3(x)
         return x
 
-class EnhancedSA_Layer(nn.Module):
-    def __init__(self, channels, reduction=4):
+class LocalFeatureAggregation(nn.Module):
+    def __init__(self, channels, k=16, groups=8):
         super().__init__()
-        self.q_conv = nn.Conv1d(channels, channels // 4, 1, bias=False)
-        self.k_conv = nn.Conv1d(channels, channels // 4, 1, bias=False)
-        self.v_conv = nn.Conv1d(channels, channels, 1)
-        self.trans_conv = nn.Conv1d(channels, channels, 1)
-        self.after_norm = nn.BatchNorm1d(channels)
-        self.act = nn.ReLU()
-        self.softmax = nn.Softmax(dim=-1)
-        self.xyz_proj = nn.Conv1d(3, channels, 1, bias=False)
+        self.k = k
+        self.groups = groups
         
-        # 通道注意力机制
-        self.channel_att = nn.Sequential(
-            nn.Linear(channels, channels // reduction),
+        self.conv_q = nn.Conv1d(channels, channels, 1, groups=groups)
+        self.conv_k = nn.Conv1d(channels, channels, 1, groups=groups) 
+        self.conv_v = nn.Conv1d(channels, channels, 1, groups=groups)
+        
+        self.conv_pos = nn.Conv2d(3, channels, 1)
+        self.conv_final = nn.Conv1d(channels, channels, 1)
+        self.bn = nn.BatchNorm1d(channels)
+        self.relu = nn.ReLU()
+        
+    def execute(self, x, xyz):
+        batch_size, channels, num_points = x.size()
+        
+        # KNN查询
+        idx = knn_point(self.k, xyz.permute(0,2,1), xyz.permute(0,2,1))
+        pos_grad = index_points(xyz.permute(0,2,1), idx) - xyz.permute(0,2,1).unsqueeze(2)
+        
+        # 位置编码
+        pos_emb = self.conv_pos(pos_grad.permute(0,3,1,2))
+        
+        # 多头注意力
+        q = self.conv_q(x).view(batch_size, self.groups, -1, num_points, 1)
+        k = self.conv_k(x).view(batch_size, self.groups, -1, num_points, self.k) 
+        v = self.conv_v(x).view(batch_size, self.groups, -1, num_points, self.k)
+        
+        energy = (q * k).sum(2) / np.sqrt(channels // self.groups)
+        attn = nn.softmax(energy, -1)
+        
+        x_transformed = (v * attn.unsqueeze(2)).sum(-1)
+        x_transformed = x_transformed.view(batch_size, -1, num_points)
+        
+        # 残差连接
+        x = x + self.relu(self.bn(self.conv_final(x_transformed)))
+        return x
+
+class AdaptiveLayerFusion(nn.Module):
+    def __init__(self, channels, num_layers):
+        super().__init__()
+        self.conv_weights = nn.Conv1d(channels, num_layers, 1)
+        
+    def execute(self, features):
+        # 计算自适应权重
+        x = concat(features, dim=1)
+        weights = nn.softmax(self.conv_weights(features[-1]), dim=1)
+        
+        # 加权融合
+        out = 0
+        for i, feat in enumerate(features):
+            out += feat * weights[:, i:i+1]
+        return out
+
+class LayerAttention(nn.Module):
+    def __init__(self, channels, num_layers):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Conv1d(channels * num_layers, channels, 1),
+            nn.BatchNorm1d(channels),
             nn.ReLU(),
-            nn.Linear(channels // reduction, channels),
+            nn.Conv1d(channels, channels * num_layers, 1),
             nn.Sigmoid()
         )
-
-    def execute(self, x, xyz):
-        xyz_feat = self.xyz_proj(xyz)
-        x = x + xyz_feat
         
-        # 残差连接
-        residual = x
-        
-        x_q = self.q_conv(x).permute(0, 2, 1)
-        x_k = self.k_conv(x)
-        x_v = self.v_conv(x)
-        
-        energy = nn.bmm(x_q, x_k)
-        attention = self.softmax(energy)
-        attention = attention / (1e-9 + attention.sum(dim=1, keepdims=True))
-        
-        # 通道注意力
-        channel_att = self.channel_att(x_v.permute(0, 2, 1).mean(1))
-        x_v = x_v * channel_att.unsqueeze(2)
-        
-        x_r = nn.bmm(x_v, attention)
-        x_r = self.act(self.after_norm(self.trans_conv(residual - x_r)))
-        
-        # 残差连接
-        return residual + x_r
+    def execute(self, x):
+        weights = self.attention(x)
+        return x * weights
 
 if __name__ == '__main__':
     
