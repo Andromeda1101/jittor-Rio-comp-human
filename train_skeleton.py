@@ -26,6 +26,9 @@ def train(args):
     Args:
         args: Command line arguments
     """
+    # 确保parents在这里定义
+    from dataset.format import parents
+
     # Initialize wandb
     # wandb.init(
     #     project="rio-skeleton",
@@ -73,29 +76,29 @@ def train(args):
     # Create loss functions
     criterion_mse = nn.MSELoss()
     
-    def bone_length_loss(pred, target, parents):
+    def bone_length_loss(pred, target, parent_list):
         """Calculate bone length consistency loss"""
         pred = pred.reshape(-1, 22, 3)
         target = target.reshape(-1, 22, 3)
         
-        pred_bones = pred[:, 1:] - jt.gather(pred, 1, jt.array([parents[1:]]).repeat(3).reshape(1, -1, 3))
-        target_bones = target[:, 1:] - jt.gather(target, 1, jt.array([parents[1:]]).repeat(3).reshape(1, -1, 3))
+        pred_bones = pred[:, 1:] - jt.gather(pred, 1, jt.array([parent_list[1:]]).repeat(3).reshape(1, -1, 3))
+        target_bones = target[:, 1:] - jt.gather(target, 1, jt.array([parent_list[1:]]).repeat(3).reshape(1, -1, 3))
         
         pred_lengths = jt.norm(pred_bones, dim=2)
         target_lengths = jt.norm(target_bones, dim=2)
         
         return nn.mse_loss(pred_lengths, target_lengths)
     
-    def symmetry_loss(pred, parents):
+    def symmetry_loss(pred, parent_list):
         """Calculate left-right symmetry loss"""
         pred = pred.reshape(-1, 22, 3)
         # Define symmetric joint pairs (example indices)
-        symmetric_pairs = [(1,4), (2,5), (3,6)] # Add your actual symmetric joint pairs
+        symmetric_pairs = [(6,10), (7,11), (8,12), (9,13), (14,18), (15,19), (16,20), (17,21)]
         
         loss = 0
         for left, right in symmetric_pairs:
-            left_bone = pred[:, left] - jt.gather(pred, 1, jt.array([[parents[left]]]).repeat(3).reshape(1, 1, 3))
-            right_bone = pred[:, right] - jt.gather(pred, 1, jt.array([[parents[right]]]).repeat(3).reshape(1, 1, 3))
+            left_bone = pred[:, left] - jt.gather(pred, 1, jt.array([[parent_list[left]]]).repeat(3).reshape(1, 1, 3))
+            right_bone = pred[:, right] - jt.gather(pred, 1, jt.array([[parent_list[right]]]).repeat(3).reshape(1, 1, 3))
             loss += nn.mse_loss(jt.abs(left_bone), jt.abs(right_bone))
             
         return loss
