@@ -282,7 +282,7 @@ def main():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=500,
                         help='Number of training epochs')
     parser.add_argument('--optimizer', type=str, default='adam',
                         choices=['sgd', 'adam'],
