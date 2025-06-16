@@ -108,7 +108,6 @@ class LocalFeatureAggregation(nn.Module):
         k = self.conv_k(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
         v = self.conv_v(x).view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
         
-        # 修复维度不匹配问题
         # 为每个点找到k个最近邻
         k = k.permute(0, 2, 3, 1)  # [B, C/G, N, G]
         k = index_points(k, idx)    # [B, C/G, N, k, G]
@@ -118,15 +117,22 @@ class LocalFeatureAggregation(nn.Module):
         v = index_points(v, idx)    # [B, C/G, N, k, G]
         v = v.permute(0, 4, 1, 2, 3)  # [B, G, C/G, N, k]
         
+        # 将位置编码分组以匹配值特征的维度
+        pos_emb = pos_emb.view(
+            batch_size, 
+            self.groups, 
+            self.channels_per_group, 
+            num_points, 
+            self.k
+        )
+        
         # 位置编码加到值特征上
-        pos_emb = pos_emb.view(batch_size, self.groups, self.channels_per_group, num_points, self.k)
         v = v + pos_emb  # 添加位置信息
         
         # Reshape for attention computation
         q = q.unsqueeze(-1)  # [B, G, C/G, N, 1]
-        k = k.unsqueeze(2)   # [B, G, 1, N, k] 
         
-        # Compute attention scores
+        # 计算注意力分数
         energy = (q * k).sum(2) / jt.sqrt(float(self.channels_per_group))  # [B, G, N, k]
         attn = nn.softmax(energy, -1)  # [B, G, N, k]
         
@@ -137,6 +143,7 @@ class LocalFeatureAggregation(nn.Module):
         # 残差连接
         x = x + self.relu(self.bn(self.conv_final(x_transformed)))
         return x
+
 
 class AdaptiveLayerFusion(nn.Module):
     def __init__(self, channels, num_layers):
