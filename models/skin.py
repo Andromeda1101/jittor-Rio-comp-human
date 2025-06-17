@@ -101,7 +101,7 @@ class EnhancedSkinModel(nn.Module):
         self.feat_dim = feat_dim
         
         # 使用增强版Transformer
-        self.pct = EnhancedPointTransformer(output_channels=feat_dim)
+        self.pct = EnhancedPointTransformer(output_channels=feat_dim, layers=6)
         
         # 顶点特征提取
         self.vertex_encoder = nn.Sequential(

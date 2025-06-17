@@ -73,6 +73,11 @@ def train(args):
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
     
+    scheduler = optim.LambdaLR(
+        optimizer, 
+        lr_lambda=lambda epoch: 0.95 ** (epoch // 10)
+    )
+    
     # Create loss functions
     criterion_mse = nn.MSELoss()
     
@@ -131,6 +136,14 @@ def train(args):
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
     for epoch in range(args.epochs):
+        # 分阶段训练
+        if epoch < 50:  # 第一阶段冻结主干
+            for param in model.transformer.parameters():
+                param.requires_grad = False
+        else:  # 第二阶段解冻
+            for param in model.parameters():
+                param.requires_grad = True
+        
         # Training phase
         model.train()
         train_loss = 0.0
@@ -142,20 +155,30 @@ def train(args):
             
             vertices = vertices.permute(0, 2, 1)  # [B, 3, N]
 
-            outputs = model(vertices)
-            joints = joints.reshape(outputs.shape[0], -1)
+            # 前向传播
+            main_output, aux_outputs = model(vertices)
+            joints = joints.reshape(main_output.shape[0], -1)
             
-            # Calculate losses
-            mse_loss = criterion_mse(outputs, joints)
-            bone_loss = bone_length_loss(outputs, joints, parents) 
-            sym_loss = symmetry_loss(outputs, parents)
+            # 计算主损失
+            mse_loss = criterion_mse(main_output, joints)
+            bone_loss = bone_length_loss(main_output, joints, parents) 
+            sym_loss = symmetry_loss(main_output, parents)
             
-            # Combined loss with weights
-            loss = mse_loss + 0.5 * bone_loss + 0.1 * sym_loss
+            # 计算辅助损失
+            aux_loss = 0
+            for aux_out in aux_outputs:
+                aux_loss += criterion_mse(aux_out, joints)
+            aux_loss = aux_loss / len(aux_outputs)
             
-            # Backward pass and optimize
+            # 组合损失（调整权重）
+            loss = mse_loss + 0.1 * bone_loss + 0.05 * sym_loss + 0.2 * aux_loss
+            
+            # 反向传播和优化
             optimizer.zero_grad()
             optimizer.backward(loss)
+            
+            # 梯度裁剪
+            optimizer.clip_grad_norm(0.01, 2)
             optimizer.step()
             
             # Calculate statistics
@@ -199,8 +222,8 @@ def train(args):
                     vertices = vertices.permute(0, 2, 1)  # [B, 3, N]
                 
                 # Forward pass
-                outputs = model(vertices)
-                loss = criterion_mse(outputs, joints)
+                main_output, _ = model(vertices)
+                loss = criterion_mse(main_output, joints)
                 
                 # export render results
                 if batch_idx == show_id:
@@ -208,12 +231,12 @@ def train(args):
                     # export every joint's corresponding skinning
                     from dataset.format import parents
                     exporter._render_skeleton(path=f"tmp/skeleton/epoch_{epoch}/skeleton_ref.png", joints=joints[0].numpy().reshape(-1, 3), parents=parents)
-                    exporter._render_skeleton(path=f"tmp/skeleton/epoch_{epoch}/skeleton_pred.png", joints=outputs[0].numpy().reshape(-1, 3), parents=parents)
+                    exporter._render_skeleton(path=f"tmp/skeleton/epoch_{epoch}/skeleton_pred.png", joints=main_output[0].numpy().reshape(-1, 3), parents=parents)
                     exporter._render_pc(path=f"tmp/skeleton/epoch_{epoch}/vertices.png", vertices=vertices[0].permute(1, 0).numpy())
 
                 val_loss += loss.item()
-                for i in range(outputs.shape[0]):
-                    J2J_loss += J2J(outputs[i].reshape(-1, 3), joints[i].reshape(-1, 3)).item() / outputs.shape[0]
+                for i in range(main_output.shape[0]):
+                    J2J_loss += J2J(main_output[i].reshape(-1, 3), joints[i].reshape(-1, 3)).item() / main_output.shape[0]
             
             # Calculate validation statistics
             val_loss /= len(val_loader)

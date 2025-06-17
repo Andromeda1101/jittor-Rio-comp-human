@@ -47,29 +47,55 @@ class SimpleSkeletonModel2(nn.Module):
 from PCT.networks.cls.enhancedpct import EnhancedPointTransformer
 
 class EnhancedSkeletonModel(nn.Module):
-    def __init__(self, feat_dim: int, output_channels: int):
+    def __init__(self, feat_dim=512, output_channels=66):
         super().__init__()
         self.feat_dim = feat_dim
         self.output_channels = output_channels
         
-        self.transformer = EnhancedPointTransformer(output_channels=feat_dim, layers=8)
+        # 使用增强点云Transformer
+        self.transformer = EnhancedPointTransformer(output_channels=feat_dim, layers=6)
         
+        # 增强的MLP结构
         self.mlp = nn.Sequential(
-            nn.Linear(feat_dim, 512),
+            nn.Linear(feat_dim, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(p=0.4),
+            
+            nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Dropout(p=0.3),
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256), 
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(256, output_channels),
+            
+            nn.Linear(512, output_channels)
         )
-    
-    def execute(self, vertices: jt.Var):
-        x = self.transformer(vertices)
-        return self.mlp(x)
+        
+        # 辅助输出层（深度监督）
+        self.aux_outputs = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(feat_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, output_channels)
+            )
+            for _ in range(3)
+        ])
 
+    def execute(self, vertices: jt.Var):
+        # 提取特征
+        x = self.transformer(vertices)
+        
+        # 主输出
+        main_output = self.mlp(x)
+        
+        # 辅助输出（深度监督）
+        aux_outputs = []
+        for aux_layer in self.aux_outputs:
+            aux_outputs.append(aux_layer(x))
+        
+        return main_output, aux_outputs
+    
+
+    
 import jsparse.nn as spnn
 from PCT.networks.jts.pct import PointTransformer3
 

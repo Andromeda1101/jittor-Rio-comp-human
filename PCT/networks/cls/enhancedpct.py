@@ -2,14 +2,16 @@ import jittor as jt
 from jittor import nn  
 from jittor import init
 from jittor.contrib import concat
+from jittor.attention import MultiheadAttention
 import numpy as np
 from PCT.misc.ops import FurthestPointSampler
 from PCT.misc.ops import knn_point, index_points
 
 class EnhancedPointTransformer(nn.Module):
-    def __init__(self, output_channels, layers):
+    def __init__(self, output_channels, layers, feat_dim=512):
         super().__init__()
-
+        self.feat_dim = feat_dim
+        
         # 多尺度特征提取
         self.conv1 = nn.Conv1d(3, 128, kernel_size=1, bias=False)
         self.conv2 = nn.Conv1d(128, 256, kernel_size=1, bias=False)
@@ -23,21 +25,24 @@ class EnhancedPointTransformer(nn.Module):
                 LocalFeatureAggregation(256, k=16, groups=8)
             )
         
-        # 自适应层间特征聚合
+        # 自适应层间特征融合
         self.adaptive_fusion = AdaptiveLayerFusion(256, layers)
         
         # 层注意力
         self.layer_attention = LayerAttention(256, layers)
         
+        # 特征融合后增加自注意力
+        self.attn_fusion = MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
+        
         # 多尺度特征融合
         self.conv_fuse = nn.Sequential(
-            nn.Conv1d(256 * layers, 1024, kernel_size=1, bias=False),
-            nn.BatchNorm1d(1024),
+            nn.Conv1d(256 * layers, feat_dim, kernel_size=1, bias=False),
+            nn.BatchNorm1d(feat_dim),
             nn.LeakyReLU(scale=0.2)
         )
         
         # 分类头
-        self.linear1 = nn.Linear(1024, 512, bias=False)
+        self.linear1 = nn.Linear(feat_dim, 512, bias=False)
         self.bn6 = nn.BatchNorm1d(512)
         self.dp1 = nn.Dropout(p=0.5)
         self.linear2 = nn.Linear(512, 256)
@@ -45,6 +50,9 @@ class EnhancedPointTransformer(nn.Module):
         self.dp2 = nn.Dropout(p=0.5)
         self.linear3 = nn.Linear(256, output_channels)
         self.relu = nn.ReLU()
+        
+        # 残差连接权重
+        self.res_weights = nn.Parameter(jt.zeros(layers))
 
     def execute(self, x):
         batch_size, C, N = x.size()
@@ -57,12 +65,15 @@ class EnhancedPointTransformer(nn.Module):
         # 分层局部特征聚合
         local_features = []
         curr_feat = x
-        for sa_layer in self.local_sa_layers:
+        for i, sa_layer in enumerate(self.local_sa_layers):
             curr_feat = sa_layer(curr_feat, x_input)
+            # 带权重的残差连接
+            identity = x if i == 0 else local_features[i-1]
+            curr_feat = identity + self.res_weights[i] * curr_feat
             local_features.append(curr_feat)
             
-        # 自适应层间特征聚合
-        x = self.adaptive_fusion(local_features)
+        # 自适应层间特征融合
+        fused_feat = self.adaptive_fusion(local_features)
         
         # 将特征连接
         x = concat(local_features, dim=1)  # [B, C*L, N]
@@ -70,10 +81,17 @@ class EnhancedPointTransformer(nn.Module):
         # 层注意力和后续处理
         x = self.layer_attention(x)
         x = self.conv_fuse(x)
-        x = jt.max(x, 2)
+        
+        # 自注意力融合
+        x = x.permute(0, 2, 1)  # [B, N, C]
+        x, _ = self.attn_fusion(x, x, x)
+        x = x.permute(0, 2, 1)  # [B, C, N]
+        
+        # 全局特征
+        global_feat = jt.max(x, 2)
         
         # 分类头
-        x = self.relu(self.bn6(self.linear1(x)))
+        x = self.relu(self.bn6(self.linear1(global_feat)))
         x = self.dp1(x)
         x = self.relu(self.bn7(self.linear2(x)))
         x = self.dp2(x)
@@ -94,9 +112,12 @@ class LocalFeatureAggregation(nn.Module):
         self.conv_pos = nn.Conv2d(3, channels, 1)
         self.conv_final = nn.Conv1d(channels, channels, 1)
         self.bn = nn.BatchNorm1d(channels)
+        self.ln = nn.LayerNorm(channels)  # 增加层归一化
         self.relu = nn.ReLU()
         
     def execute(self, x, xyz):
+        identity = x  # 保存输入用于残差连接
+        
         batch_size, channels, num_points = x.size()
         
         # KNN查询
@@ -118,15 +139,12 @@ class LocalFeatureAggregation(nn.Module):
         v = v.view(batch_size, self.groups, self.channels_per_group, num_points)  # [B, G, C/G, N]
         
         # 为每个点找到k个最近邻
-        # 使用分组索引
         k_grouped = []
         v_grouped = []
         for g in range(self.groups):
-            # 提取当前组的特征 [B, C/G, N]
             k_g = k[:, g, :, :]
             v_g = v[:, g, :, :]
             
-            # 索引当前组的最近邻 [B, C/G, N, k]
             k_idx = index_points(k_g.permute(0, 2, 1), idx)  # [B, N, k, C/G]
             k_idx = k_idx.permute(0, 3, 1, 2)  # [B, C/G, N, k]
             
@@ -136,12 +154,10 @@ class LocalFeatureAggregation(nn.Module):
             k_grouped.append(k_idx)
             v_grouped.append(v_idx)
         
-        # 合并组 [B, G, C/G, N, k]
         k = jt.stack(k_grouped, dim=1)
         v = jt.stack(v_grouped, dim=1)
         
         # 处理位置编码
-        # 将位置编码分组以匹配值特征的维度
         pos_emb = pos_emb.view(
             batch_size, 
             self.groups, 
@@ -151,26 +167,25 @@ class LocalFeatureAggregation(nn.Module):
         )
         
         # 位置编码加到值特征上
-        v = v + pos_emb  # 添加位置信息
+        v = v + pos_emb
         
         # 准备查询向量 [B, G, C/G, N, 1]
         q = q.unsqueeze(-1)
         
         # 计算注意力分数
-        # k的维度是 [B, G, C/G, N, k]
         energy = (q * k).sum(2) / jt.sqrt(float(self.channels_per_group))  # [B, G, N, k]
         attn = nn.softmax(energy, -1)  # [B, G, N, k]
         
         # 应用注意力到值特征
-        # v的维度是 [B, G, C/G, N, k]
-        # attn的维度是 [B, G, N, k] -> 扩展为 [B, G, 1, N, k]
         x_transformed = (v * attn.unsqueeze(2)).sum(-1)  # [B, G, C/G, N]
         
         # 合并组特征 [B, C, N]
         x_transformed = x_transformed.permute(0, 2, 1, 3).contiguous().view(batch_size, -1, num_points)
         
-        # 残差连接
-        x = x + self.relu(self.bn(self.conv_final(x_transformed)))
+        # 残差连接 + 层归一化
+        x_transformed = self.conv_final(x_transformed)
+        x = identity + self.relu(self.bn(x_transformed))
+        x = self.ln(x.permute(0, 2, 1)).permute(0, 2, 1)  # 层归一化
         return x
 
 
@@ -179,27 +194,39 @@ class AdaptiveLayerFusion(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         self.channels = channels
-        # 修改卷积层结构，确保维度匹配
+        
+        # 增加融合权重网络复杂度
         self.conv_weights = nn.Sequential(
-            nn.Conv1d(channels, channels // 2, 1),
-            nn.BatchNorm1d(channels // 2),
-            nn.ReLU(),
-            nn.Conv1d(channels // 2, num_layers, 1),
-            nn.Softmax(dim=1)
+            nn.Conv1d(channels, channels * 2, 1),
+            nn.BatchNorm1d(channels * 2),
+            nn.LeakyReLU(scale=0.2),
+            nn.Conv1d(channels * 2, num_layers, 1),
+            # 移除 Softmax，稍后手动应用
         )
         
     def execute(self, features):
-        batch_size = features[0].shape[0]
-        # 将所有特征堆叠 [B, L, C, N]
-        x = jt.stack(features, dim=1)
+        # 计算全局特征
+        global_features = [jt.mean(feat, dim=2) for feat in features]
+        global_features = jt.stack(global_features, dim=1)  # [B, L, C]
         
-        # 计算注意力权重 [B, L, N]
-        # 使用最后一层特征来计算权重
-        weights = self.conv_weights(features[-1])  # [B, L, N]
-        weights = weights.unsqueeze(2)  # [B, L, 1, N]
+        # 转置为 [B, C, L]
+        global_features = global_features.permute(0, 2, 1)
         
-        # 应用权重
-        out = (x * weights).sum(1)  # [B, C, N]
+        # 计算注意力权重 [B, num_layers, L]
+        weights = self.conv_weights(global_features)
+        
+        # 应用 Softmax 并移除不必要的维度
+        weights = nn.softmax(weights, dim=1)  # [B, num_layers, L]
+        
+        # 加权融合
+        out = jt.zeros_like(features[0])
+        for i in range(self.num_layers):
+            # 选择当前层的权重 [B, 1, L] -> [B, 1]
+            layer_weight = weights[:, i:i+1, :].mean(dim=2)
+            
+            # 应用权重 [B, C, N]
+            out += features[i] * layer_weight.unsqueeze(-1).unsqueeze(-1)
+        
         return out
 
 class LayerAttention(nn.Module):
@@ -207,38 +234,29 @@ class LayerAttention(nn.Module):
         super().__init__()
         self.channels = channels
         self.num_layers = num_layers
+        
+        # 增强注意力机制
         self.attention = nn.Sequential(
-            nn.Conv1d(channels * num_layers, channels, 1),
-            nn.BatchNorm1d(channels),
-            nn.ReLU(),
-            nn.Conv1d(channels, num_layers, 1),
+            nn.Conv1d(channels * num_layers, channels * 4, 1),
+            nn.BatchNorm1d(channels * 4),
+            nn.LeakyReLU(scale=0.2),
+            nn.Conv1d(channels * 4, channels * 2, 1),
+            nn.BatchNorm1d(channels * 2),
+            nn.LeakyReLU(scale=0.2),
+            nn.Conv1d(channels * 2, num_layers, 1),
             nn.Sigmoid()
         )
         
     def execute(self, x):
         batch_size = x.size(0)
-        # x 是融合后的特征图 [B, C*L, N]
-        
-        # 计算注意力权重 [B, L, N]
-        weights = self.attention(x)
+        weights = self.attention(x)  # [B, L, N]
         
         # 将输入特征调整为 [B, L, C, N]
         x = x.view(batch_size, self.num_layers, self.channels, -1)
         
         # 调整权重维度为 [B, L, 1, N]
-        weights = weights.unsqueeze(2)
+        weights = weights.view(batch_size, self.num_layers, 1, -1)
         
         # 应用注意力权重
-        weighted = x * weights  # [B, L, C, N]
-        
-        # 重新整形为 [B, L*C, N]
+        weighted = x * weights
         return weighted.view(batch_size, -1, weighted.size(-1))
-
-if __name__ == '__main__':
-    
-    jt.flags.use_cuda=1
-    input_points = init.gauss((16, 3, 1024), dtype='float32')  # B, D, N 
-
-    network = EnhancedPointTransformer()
-    out_logits = network(input_points)
-    print (out_logits.shape)

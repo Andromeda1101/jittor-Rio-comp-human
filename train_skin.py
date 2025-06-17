@@ -145,8 +145,10 @@ def train(args):
             sparse_loss = sparsity_loss(outputs)
             
             # Combined loss with weights
-            loss = mse_loss + l1_loss + 0.1 * smooth_loss + 0.01 * sparse_loss
+            loss = mse_loss + l1_loss + 0.05 * smooth_loss + 0.001 * sparse_loss
             
+            # 梯度裁剪
+            nn.clip_grad_value_(model.parameters(), clip_value=1.0)
             # Backward pass and optimize
             optimizer.zero_grad()
             optimizer.backward(loss)
@@ -164,6 +166,9 @@ def train(args):
                            f"Loss mse: {mse_loss.item():.4f} Loss l1: {l1_loss.item():.4f} "
                            f"Loss smooth: {smooth_loss.item():.4f} Loss sparse: {sparse_loss.item():.4f}")
         
+        scheduler = optim.LambdaLR(optimizer, lr_lambda=lambda epoch: 0.95 ** (epoch // 10))
+        scheduler.step(epoch)
+
         # Calculate epoch statistics
         train_loss_mse /= len(train_loader)
         train_loss_l1 /= len(train_loader)
