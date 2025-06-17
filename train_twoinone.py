@@ -6,10 +6,12 @@ import time
 import random
 
 from jittor import nn, optim
+
 from dataset.dataset import get_dataloader, transform
+from dataset.sampler import SamplerMix
 from models.twoinone import JointSkinModel
 
-jt.flags.use_cuda = 1
+jt.flags.use_cuda = 0  # 训练建议用1
 
 def train(args):
     # 创建输出目录
@@ -23,16 +25,41 @@ def train(args):
 
     log_message(f"Starting training with parameters: {args}")
 
-    # 数据加载
-    train_loader = get_dataloader(split='train', batch_size=args.batch_size, shuffle=True)
-    val_loader = get_dataloader(split='val', batch_size=args.batch_size, shuffle=False) if args.val else None
+    # 初始化采样器
+    sampler = SamplerMix(num_samples=1024, vertex_samples=512)
 
-    # 模型
+    # 创建模型
     model = JointSkinModel(feat_dim=args.feat_dim, num_joints=args.num_joints)
-    model.cuda()
+    if jt.flags.use_cuda:
+        model.cuda()
+
+    # 优化器
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion_joint = nn.MSELoss()
     criterion_skin = nn.MSELoss()
+
+    # 数据加载
+    train_loader = get_dataloader(
+        data_root=args.data_root,
+        data_list=args.train_data_list,
+        train=True,
+        batch_size=args.batch_size,
+        shuffle=True,
+        sampler=sampler,
+        transform=transform,
+    )
+    if args.val_data_list:
+        val_loader = get_dataloader(
+            data_root=args.data_root,
+            data_list=args.val_data_list,
+            train=False,
+            batch_size=args.batch_size,
+            shuffle=False,
+            sampler=sampler,
+            transform=transform,
+        )
+    else:
+        val_loader = None
 
     best_loss = 1e10
     no_improve_epochs = 0
@@ -42,26 +69,37 @@ def train(args):
         train_loss_joint = 0.0
         train_loss_skin = 0.0
         start_time = time.time()
-        for batch_idx, batch in enumerate(train_loader):
-            vertices = batch['vertices'].cuda()  # [B, N, 3]
-            gt_joints = batch['joints'].cuda()   # [B, J, 3]
-            gt_skin = batch['skin'].cuda()       # [B, N, J]
+        for batch_idx, data in enumerate(train_loader):
+            try:
+                vertices = data['vertices']
+                gt_joints = data['joints']
+                gt_skin = data['skin']
+                # [B, N, 3] -> [B, N, 3]，如需 [B, 3, N] 可 permute
+                # vertices = vertices.permute(0, 2, 1)  # 若模型需要
 
-            pred_joints, pred_skin = model(vertices)
-            loss_joint = criterion_joint(pred_joints, gt_joints)
-            loss_skin = criterion_skin(pred_skin, gt_skin)
-            loss = loss_joint + loss_skin
+                if jt.flags.use_cuda:
+                    vertices = vertices.cuda()
+                    gt_joints = gt_joints.cuda()
+                    gt_skin = gt_skin.cuda()
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                pred_joints, pred_skin = model(vertices)
+                loss_joint = criterion_joint(pred_joints, gt_joints)
+                loss_skin = criterion_skin(pred_skin, gt_skin)
+                loss = loss_joint + loss_skin
 
-            train_loss_joint += loss_joint.item()
-            train_loss_skin += loss_skin.item()
+                optimizer.zero_grad()
+                optimizer.backward(loss)
+                optimizer.step()
 
-            if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
-                log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                            f"Loss joint: {loss_joint.item():.4f} Loss skin: {loss_skin.item():.4f}")
+                train_loss_joint += loss_joint.item()
+                train_loss_skin += loss_skin.item()
+
+                if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
+                    log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
+                                f"Loss joint: {loss_joint.item():.4f} Loss skin: {loss_skin.item():.4f}")
+            except Exception as e:
+                log_message(f"Batch {batch_idx+1} error: {e}")
+                continue
 
         train_loss_joint /= len(train_loader)
         train_loss_skin /= len(train_loader)
@@ -77,15 +115,23 @@ def train(args):
             model.eval()
             val_loss_joint = 0.0
             val_loss_skin = 0.0
-            for batch in val_loader:
-                vertices = batch['vertices'].cuda()
-                gt_joints = batch['joints'].cuda()
-                gt_skin = batch['skin'].cuda()
-                pred_joints, pred_skin = model(vertices)
-                loss_joint = criterion_joint(pred_joints, gt_joints)
-                loss_skin = criterion_skin(pred_skin, gt_skin)
-                val_loss_joint += loss_joint.item()
-                val_loss_skin += loss_skin.item()
+            for batch_idx, data in enumerate(val_loader):
+                try:
+                    vertices = data['vertices']
+                    gt_joints = data['joints']
+                    gt_skin = data['skin']
+                    if jt.flags.use_cuda:
+                        vertices = vertices.cuda()
+                        gt_joints = gt_joints.cuda()
+                        gt_skin = gt_skin.cuda()
+                    pred_joints, pred_skin = model(vertices)
+                    loss_joint = criterion_joint(pred_joints, gt_joints)
+                    loss_skin = criterion_skin(pred_skin, gt_skin)
+                    val_loss_joint += loss_joint.item()
+                    val_loss_skin += loss_skin.item()
+                except Exception as e:
+                    log_message(f"Val batch {batch_idx+1} error: {e}")
+                    continue
             val_loss_joint /= len(val_loader)
             val_loss_skin /= len(val_loader)
             log_message(f"Validation Loss: joint: {val_loss_joint:.4f} skin: {val_loss_skin:.4f}")
@@ -116,18 +162,21 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Train JointSkinModel')
+    parser.add_argument('--train_data_list', type=str, default='data/train_list.txt')
+    parser.add_argument('--val_data_list', type=str, default='data/val_list.txt')
+    parser.add_argument('--data_root', type=str, default='data')
+    parser.add_argument('--model_name', type=str, default='twoinone')
+    parser.add_argument('--output_dir', type=str, default='output/twoinone')
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--feat_dim', type=int, default=256)
+    parser.add_argument('--feat_dim', type=int, default=384)
     parser.add_argument('--num_joints', type=int, default=22)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--output_dir', type=str, default='output/twoinone')
     parser.add_argument('--print_freq', type=int, default=10)
     parser.add_argument('--save_freq', type=int, default=10)
     parser.add_argument('--val_freq', type=int, default=1)
     parser.add_argument('--patience', type=int, default=10)
-    parser.add_argument('--val', action='store_true', help='Enable validation')
     args = parser.parse_args()
     train(args)
 

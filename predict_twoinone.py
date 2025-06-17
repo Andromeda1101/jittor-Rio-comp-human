@@ -7,11 +7,11 @@ from tqdm import tqdm
 from models.twoinone import JointSkinModel
 from dataset.dataset import get_dataloader
 
-jt.flags.use_cuda = 1
+jt.flags.use_cuda = 0
 
 def predict(args):
     model = JointSkinModel(feat_dim=args.feat_dim, num_joints=args.num_joints)
-    model.load_parameters(args.model_path)
+    model.load(args.model_path)
     model.eval()
     loader = get_dataloader(split='test', batch_size=1, shuffle=False)
 
@@ -38,10 +38,14 @@ def predict(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Predict with JointSkinModel')
-    parser.add_argument('--feat_dim', type=int, default=256)
-    parser.add_argument('--num_joints', type=int, default=22)
+    parser.add_argument('--predict_data_list', type=str, required=True)
+    parser.add_argument('--data_root', type=str, required=True)
+    parser.add_argument('--model_name', type=str, default='twoinone')
     parser.add_argument('--model_path', type=str, required=True)
-    parser.add_argument('--output_dir', type=str, default='output/twoinone_pred')
+    parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--feat_dim', type=int, default=384)
+    parser.add_argument('--num_joints', type=int, default=22)
     args = parser.parse_args()
     predict(args)
 
