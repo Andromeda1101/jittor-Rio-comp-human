@@ -94,7 +94,11 @@ def train(args):
             vertices = data['vertices']
             gt_joints = data['joints']
             gt_skin = data['skin']
-
+            
+            vertices: jt.Var
+            gt_joints: jt.Var
+            gt_skin: jt.Var
+            
             if jt.flags.use_cuda:
                 vertices = vertices.cuda()
                 gt_joints = gt_joints.cuda()
@@ -115,14 +119,15 @@ def train(args):
             # 总损失
             
             loss = loss_joint + loss_skin_mse + loss_skin_l1 + 0.1 * loss_bone
+            log_message(111)
             optimizer.zero_grad()
             optimizer.backward(loss)
             optimizer.step()
-            
+            log_message(222)
             train_loss_joint += loss_joint.item()
+            log_message(333)
             train_loss_skin_mse += loss_skin_mse.item()
             train_loss_skin_l1 += loss_skin_l1.item()
-
             if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
                             f"Loss joint(CD): {loss_joint.item():.4f} "

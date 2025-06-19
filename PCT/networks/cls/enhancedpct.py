@@ -14,6 +14,7 @@ class EnhancedPointTransformer(nn.Module):
         self.conv2 = nn.Conv1d(128, 256, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm1d(128)
         self.bn2 = nn.BatchNorm1d(256)
+        self.relu = nn.ReLU()
         
         # 增加SA层数量并添加残差
         self.sa_layers = nn.ModuleList()
@@ -26,16 +27,15 @@ class EnhancedPointTransformer(nn.Module):
             nn.BatchNorm1d(output_channels),
             nn.LeakyReLU(scale=0.2)
         )
-        
-        # 分类头（仅用于分类任务）
-        self.linear1 = nn.Linear(output_channels, 512, bias=False)
-        self.bn6 = nn.BatchNorm1d(512)
-        self.dp1 = nn.Dropout(p=0.5)
-        self.linear2 = nn.Linear(512, 256)
-        self.bn7 = nn.BatchNorm1d(256)
-        self.dp2 = nn.Dropout(p=0.5)
-        self.linear3 = nn.Linear(256, 40)
-        self.relu = nn.ReLU()
+        if not return_point_features:
+            # 分类头（仅用于分类任务）
+            self.linear1 = nn.Linear(output_channels, 512, bias=False)
+            self.bn6 = nn.BatchNorm1d(512)
+            self.dp1 = nn.Dropout(p=0.5)
+            self.linear2 = nn.Linear(512, 256)
+            self.bn7 = nn.BatchNorm1d(256)
+            self.dp2 = nn.Dropout(p=0.5)
+            self.linear3 = nn.Linear(256, 40)
     
     def execute(self, x):
         batch_size, C, N = x.size()
@@ -57,15 +57,15 @@ class EnhancedPointTransformer(nn.Module):
 
         if self.return_point_features:
             return x  # [B, output_channels, N]
-
-        # 全局池化+分类头
-        x = jt.max(x, 2).view(batch_size, -1)
-        x = self.relu(self.bn6(self.linear1(x)))
-        x = self.dp1(x)
-        x = self.relu(self.bn7(self.linear2(x)))
-        x = self.dp2(x)
-        x = self.linear3(x)
-        return x
+        else:
+            # 全局池化+分类头
+            x = jt.max(x, 2).view(batch_size, -1)
+            x = self.relu(self.bn6(self.linear1(x)))
+            x = self.dp1(x)
+            x = self.relu(self.bn7(self.linear2(x)))
+            x = self.dp2(x)
+            x = self.linear3(x)
+            return x
 
 class EnhancedSA_Layer(nn.Module):
     def __init__(self, channels, reduction=4):
