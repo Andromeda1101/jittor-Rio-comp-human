@@ -190,5 +190,8 @@ cython_debug/
 .pypirc
 data
 
-predict*/
-output*/
+JSparse/
+jsparse/
+output**/
+predict**/
+**/**/**/*.npy

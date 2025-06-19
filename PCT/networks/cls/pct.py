@@ -166,10 +166,10 @@ class Point_Transformer_Last(nn.Module):
         batch_size, _, N = x.size()
         # add position embedding
         xyz = xyz.permute(0, 2, 1)
-        xyz = self.pos_xyz(xyz)
-        # end
-        x = self.relu(self.bn1(self.conv1(x))) # B, D, N
-
+        position_embedding = self.conv_pos(xyz)  # 使用 conv_pos 替代 pos_xyz
+        x = x + position_embedding  # 将位置嵌入添加到特征中
+        x = self.relu(self.bn1(self.conv1(x)))  # B, D, N
+        
         x1 = self.sa1(x, xyz)
         x2 = self.sa2(x1, xyz)
         x3 = self.sa3(x2, xyz)
