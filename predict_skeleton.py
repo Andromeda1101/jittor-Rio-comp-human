@@ -46,12 +46,12 @@ def predict(args):
         if vertices.ndim == 3:  # [B, N, 3]
             vertices = vertices.permute(0, 2, 1)  # [B, 3, N]
         B = vertices.shape[0]
-        outputs = model(vertices)
-        outputs = outputs.reshape(B, -1, 3)
+        main_outputs, _ = model(vertices)
+        main_outputs = main_outputs.reshape(B, -1, 3)
         for i in range(len(cls)):
             path = os.path.join(predict_output_dir, cls[i], str(id[i].item()))
             os.makedirs(path, exist_ok=True)
-            np.save(os.path.join(path, "predict_skeleton"), outputs[i])
+            np.save(os.path.join(path, "predict_skeleton"), main_outputs[i])
     print("finished")
 
 def main():

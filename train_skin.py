@@ -147,11 +147,12 @@ def train(args):
             # Combined loss with weights
             loss = mse_loss + l1_loss + 0.05 * smooth_loss + 0.001 * sparse_loss
             
-            # 梯度裁剪
-            nn.clip_grad_value_(model.parameters(), clip_value=1.0)
+            
             # Backward pass and optimize
             optimizer.zero_grad()
             optimizer.backward(loss)
+            # 梯度裁剪
+            optimizer.clip_grad_norm(0.01, 2)
             optimizer.step()
             
             # Calculate statistics
