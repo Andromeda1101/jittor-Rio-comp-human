@@ -80,8 +80,8 @@ class JointSkinModel(nn.Module):
         self.feat_dim = feat_dim
         self.num_joints = num_joints
         # 多尺度主干特征
-        self.point_transformer = EnhancedPointTransformer(output_channels=feat_dim)
-        self.local_transformer = EnhancedPointTransformer(output_channels=feat_dim//2)
+        self.point_transformer = EnhancedPointTransformer(output_channels=feat_dim, return_point_features=True)
+        self.local_transformer = EnhancedPointTransformer(output_channels=feat_dim//2, return_point_features=True)
         self.fuse_proj = nn.Linear(feat_dim + feat_dim//2, feat_dim)
         # 深层Transformer编码
         self.encoder = nn.Sequential(*[TransformerLayer(feat_dim, attn_heads) for _ in range(attn_layers)])

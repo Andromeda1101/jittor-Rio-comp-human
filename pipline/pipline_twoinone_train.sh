@@ -2,13 +2,12 @@ python train_twoinone.py \
   --train_data_list data/train_list.txt \
   --val_data_list data/val_list.txt \
   --data_root data \
-  --model_name twoinone \
   --output_dir output/twoinone \
   --batch_size 8 \
   --feat_dim 384 \
   --num_joints 22 \
   --epochs 100 \
-  --lr 1e-3 \
+  --learning_rate 1e-3 \
   --weight_decay 1e-4 \
   --print_freq 10 \
   --save_freq 10 \

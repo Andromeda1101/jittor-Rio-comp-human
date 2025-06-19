@@ -3,12 +3,13 @@ from jittor import nn
 from jittor import init
 from jittor.contrib import concat
 import numpy as np
-from PCT.misc.ops import FurthestPointSampler
-from PCT.misc.ops import knn_point, index_points
 
 class EnhancedPointTransformer(nn.Module):
-    def __init__(self, output_channels=40, layers=8):
+    def __init__(self, output_channels=384, layers=8, return_point_features=False):
         super().__init__()
+        self.return_point_features = return_point_features
+        self.output_channels = output_channels
+
         self.conv1 = nn.Conv1d(3, 128, kernel_size=1, bias=False)
         self.conv2 = nn.Conv1d(128, 256, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm1d(128)
@@ -21,19 +22,19 @@ class EnhancedPointTransformer(nn.Module):
         
         # 多尺度特征融合
         self.conv_fuse = nn.Sequential(
-            nn.Conv1d(256 * layers, 1024, kernel_size=1, bias=False),
-            nn.BatchNorm1d(1024),
+            nn.Conv1d(256 * layers, output_channels, kernel_size=1, bias=False),
+            nn.BatchNorm1d(output_channels),
             nn.LeakyReLU(scale=0.2)
         )
         
-        # 分类头
-        self.linear1 = nn.Linear(1024, 512, bias=False)
+        # 分类头（仅用于分类任务）
+        self.linear1 = nn.Linear(output_channels, 512, bias=False)
         self.bn6 = nn.BatchNorm1d(512)
         self.dp1 = nn.Dropout(p=0.5)
         self.linear2 = nn.Linear(512, 256)
         self.bn7 = nn.BatchNorm1d(256)
         self.dp2 = nn.Dropout(p=0.5)
-        self.linear3 = nn.Linear(256, output_channels)
+        self.linear3 = nn.Linear(256, 40)
         self.relu = nn.ReLU()
     
     def execute(self, x):
@@ -51,11 +52,14 @@ class EnhancedPointTransformer(nn.Module):
             sa_outputs.append(x)
         
         # 多尺度特征融合
-        x = concat(sa_outputs, dim=1)
-        x = self.conv_fuse(x)
+        x = concat(sa_outputs, dim=1)  # [B, 256*layers, N]
+        x = self.conv_fuse(x)          # [B, output_channels, N]
+
+        if self.return_point_features:
+            return x  # [B, output_channels, N]
+
+        # 全局池化+分类头
         x = jt.max(x, 2).view(batch_size, -1)
-        
-        # 分类头
         x = self.relu(self.bn6(self.linear1(x)))
         x = self.dp1(x)
         x = self.relu(self.bn7(self.linear2(x)))
@@ -107,14 +111,3 @@ class EnhancedSA_Layer(nn.Module):
         
         # 残差连接
         return residual + x_r
-
-if __name__ == '__main__':
-    
-    jt.flags.use_cuda=1
-    input_points = init.gauss((16, 3, 1024), dtype='float32')  # B, D, N 
-
-
-    network = EnhancedPointTransformer()
-    out_logits = network(input_points)
-    print (out_logits.shape)
-
