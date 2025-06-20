@@ -1,4 +1,2 @@
-bash launch/train_skeleton.sh
-bash launch/train_skin.sh
-bash launch/predict_skeleton.sh
-bash launch/predict_skin.sh
+bash pipline/pipline_skeleton_enhanced.sh
+bash pipline/pipline_skin_enhanced.sh
