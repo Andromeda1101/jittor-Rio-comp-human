@@ -102,8 +102,8 @@ def train(args):
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
     for epoch in range(args.epochs):
-        current_symm_weight = args.symm_bone_weight * min(1.0, (epoch + 1) / args.constraint_warmup)
-        current_angle_weight = args.angle_weight * min(1.0, (epoch + 1) / args.constraint_warmup)
+        current_symm_weight = 0.2 * min(1.0, (epoch + 1) / 10)
+        current_angle_weight = 0.1 * min(1.0, (epoch + 1) / 10)
 
         # Training phase
         model.train()

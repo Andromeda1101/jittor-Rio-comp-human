@@ -101,7 +101,7 @@ def train(args):
     no_improve_epochs = 0  # Counter for early stopping
     for epoch in range(args.epochs):
         # Dynamic constraint weight
-        current_symm_weight = args.skin_symm_weight * min(1.0, (epoch + 1) / args.constraint_warmup)
+        current_symm_weight = 0.1 * min(1.0, (epoch + 1) / 10)
 
         # Training phase
         model.train()
