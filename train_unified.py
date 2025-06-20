@@ -291,7 +291,7 @@ def main():
     args = parser.parse_args()
     
     # 创建可视化目录
-    os.makedirs(os.path.join(args.output_dir, 'vis'), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir), exist_ok=True)
     
     # 开始训练
     train(args)
