@@ -234,7 +234,7 @@ def main():
     
     # Model parameters
     parser.add_argument('--model_name', type=str, default='pct',
-                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced'],
+                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced', 'unified'],
                         help='Model architecture to use')
     parser.add_argument('--model_type', type=str, default='standard',
                         choices=['standard', 'enhanced'],

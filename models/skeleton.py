@@ -97,4 +97,7 @@ def create_model(model_name='pct', output_channels=66, **kwargs):
         return SimpleSkeletonModel2(feat_dim=256, output_channels=output_channels)
     elif model_name == "enhanced":
         return EnhancedSkeletonModel(feat_dim=256, output_channels=output_channels)
+    elif model_name == "unified":
+        from models.unified import UnifiedModel
+        return UnifiedModel(feat_dim=256, num_joints=output_channels // 3)
     raise NotImplementedError()

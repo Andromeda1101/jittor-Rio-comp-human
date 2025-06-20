@@ -227,4 +227,7 @@ def create_model(model_name='pct', feat_dim=256, **kwargs):
         return SimpleSkinModel2(feat_dim=feat_dim, num_joints=22)
     elif model_name == "enhanced":
         return EnhancedSkinModel(feat_dim=feat_dim, num_joints=22)
+    elif model_name == "unified":
+        from models.unified import UnifiedModel
+        return UnifiedModel(feat_dim=feat_dim, num_joints=22)
     raise NotImplementedError()
