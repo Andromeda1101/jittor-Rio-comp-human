@@ -7,7 +7,7 @@ from dataset.asset import Asset
 from dataset.dataset import get_dataloader, transform
 from dataset.sampler import SamplerMix
 from models.skin import create_model
-
+import jittor.nn as nn
 import numpy as np
 from scipy.spatial import cKDTree
 import random
@@ -41,6 +41,8 @@ def predict(args):
         return_origin_vertices=True,
     )
     predict_output_dir = args.predict_output_dir
+    criterion_l1 = nn.L1Loss()
+    loss_l1 = 0.0
     print("start predicting...")
     for batch_idx, data in tqdm(enumerate(predict_loader)):
         # currently only support batch_size==1 because origin_vertices is not padded
@@ -56,6 +58,8 @@ def predict(args):
         
         B = vertices.shape[0]
         outputs = model(vertices, joints)
+        loss_l1 += criterion_l1(outputs, skin).item()
+
         for i in range(B):
             # resample
             skin = outputs[i].numpy()
@@ -76,6 +80,13 @@ def predict(args):
             os.makedirs(path, exist_ok=True)
             np.save(os.path.join(path, "predict_skin"), skin_resampled)
             np.save(os.path.join(path, "transformed_vertices"), o_vertices)
+    # Calculate average L1 loss
+    avg_l1_loss = loss_l1 / len(predict_loader)
+    print(f"L1 Loss: {avg_l1_loss}")
+    
+    # Append result to train_results.txt
+    with open('train_result.txt', 'a') as f:
+        f.write(f"L1 Loss: {avg_l1_loss}\n")
     print("finished")
 
 def main():

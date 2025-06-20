@@ -7,6 +7,7 @@ from dataset.dataset import get_dataloader, transform
 from dataset.sampler import SamplerMix
 from dataset.exporter import Exporter
 from models.skeleton import create_model
+from models.metrics import J2J
 
 from tqdm import tqdm
 
@@ -42,16 +43,23 @@ def predict(args):
     exporter = Exporter()
     for batch_idx, data in tqdm(enumerate(predict_loader)):
         vertices, cls, id = data['vertices'], data['cls'], data['id']
+        joints = data['joints']
+        J2J_loss = 0.0
         # Reshape input if needed
         if vertices.ndim == 3:  # [B, N, 3]
             vertices = vertices.permute(0, 2, 1)  # [B, 3, N]
         B = vertices.shape[0]
         outputs = model(vertices)
         outputs = outputs.reshape(B, -1, 3)
+        for i in range(outputs.shape[0]):
+            J2J_loss += J2J(outputs[i].reshape(-1, 3), joints[i].reshape(-1, 3)).item() / outputs.shape[0]
         for i in range(len(cls)):
             path = os.path.join(predict_output_dir, cls[i], str(id[i].item()))
             os.makedirs(path, exist_ok=True)
             np.save(os.path.join(path, "predict_skeleton"), outputs[i])
+    print("J2J loss: ", J2J_loss)
+    with open('train_result.txt', 'a') as f:
+        f.write(f"J2J loss: {J2J_loss}\n")
     print("finished")
 
 def main():
