@@ -10,9 +10,10 @@ from jittor import nn
 from jittor import optim
 
 from dataset.dataset import get_dataloader, transform
-from dataset.format import id_to_name
+from dataset.format import id_to_name, symmetry_map, symmetric_joints
 from dataset.sampler import SamplerMix
 from models.skin import create_model
+from models.metrics import skin_symmetry_constraint
 
 from dataset.exporter import Exporter
 
@@ -99,15 +100,21 @@ def train(args):
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
     for epoch in range(args.epochs):
+        # Dynamic constraint weight
+        current_symm_weight = args.skin_symm_weight * min(1.0, (epoch + 1) / args.constraint_warmup)
+
         # Training phase
         model.train()
         train_loss_mse = 0.0
         train_loss_l1 = 0.0
+        symm_loss_total = 0.0
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
             # Get data and labels
             vertices, joints, skin = data['vertices'], data['joints'], data['skin']
+            
+            symm_map = data.get('symmetry_map', symmetry_map)
 
             vertices: jt.Var
             joints: jt.Var
@@ -115,11 +122,19 @@ def train(args):
             outputs = model(vertices, joints)
             loss_mse = criterion_mse(outputs, skin)
             loss_l1 = criterion_l1(outputs, skin)
-            loss = loss_mse + loss_l1
+            base_loss = loss_mse + loss_l1
+
+            # Apply skin symmetry constraint
+            symm_loss = skin_symmetry_constraint(
+                outputs, symm_map, symmetric_joints
+            ) * current_symm_weight
+            symm_loss_total += symm_loss.item()
+            
+            total_loss = base_loss + symm_loss
             
             # Backward pass and optimize
             optimizer.zero_grad()
-            optimizer.backward(loss)
+            optimizer.backward(total_loss)
             optimizer.step()
             
             # Calculate statistics
@@ -129,16 +144,18 @@ def train(args):
             # Print progress
             if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                           f"Loss mse: {loss_mse.item():.4f} Loss l1: {loss_l1.item():.4f}")
+                           f"Loss mse: {loss_mse.item():.4f} Loss l1: {loss_l1.item():.4f} Symm Loss: {symm_loss.item():.4f} ")
         
         # Calculate epoch statistics
         train_loss_mse /= len(train_loader)
         train_loss_l1 /= len(train_loader)
+        symm_loss_total /= len(train_loader)
         epoch_time = time.time() - start_time
         
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
                    f"Train Loss mse: {train_loss_mse:.4f} "
                    f"Train Loss l1: {train_loss_l1:.4f} "
+                   f"Symm Loss: {symm_loss_total:.4f} "
                    f"Time: {epoch_time:.2f}s "
                    f"LR: {optimizer.lr:.6f}")
         
@@ -233,7 +250,7 @@ def main():
                         help='Root directory for the data files')
     
     # Model parameters
-    parser.add_argument('--model_name', type=str, default='pct',
+    parser.add_argument('--model_name', type=str, default='enhanced',
                         choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced'],
                         help='Model architecture to use')
     parser.add_argument('--model_type', type=str, default='standard',
@@ -247,7 +264,7 @@ def main():
                         help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=1000,
                         help='Number of training epochs')
-    parser.add_argument('--optimizer', type=str, default='adam',
+    parser.add_argument('--optimizer', type=str, default='sgd',
                         choices=['sgd', 'adam'],
                         help='Optimizer to use')
     parser.add_argument('--learning_rate', type=float, default=0.0001,
