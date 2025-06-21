@@ -40,7 +40,8 @@ def train(args):
     # 创建模型
     model = UnifiedModel(
         feat_dim=args.feat_dim,
-        num_joints=args.num_joints
+        num_joints=args.num_joints,
+        transformer_name=args.transformer_name
     )
     
     # 加载预训练模型
@@ -255,19 +256,20 @@ def train(args):
             val_joint_loss /= len(val_loader)
             l1_loss /= len(val_loader)
             mse_loss /= len(val_loader)
-            total_val_loss = val_joint_loss + args.skin_weight * (l1_loss + mse_loss)
+            J2J_loss /= len(val_loader)
+            val_loss = J2J_loss + args.skin_weight * l1_loss
             
-            log_message(f"Validation J2J Loss: {val_joint_loss:.4f} "
+            log_message(f"Validation J2J Loss: {J2J_loss:.4f} "
                       f"Skin MSE Loss: {mse_loss:.4f} "
                       f"Skin L1 Loss: {l1_loss:.4f} "
                       )
             
             # 保存最佳模型
-            if l1_loss < best_loss:
-                best_loss = l1_loss
+            if val_loss < best_loss:
+                best_loss = val_loss
                 model_path = os.path.join(args.output_dir, 'best_model.pkl')
                 model.save(model_path)
-                log_message(f"Saved best model with L1 loss {best_loss:.4f} to {model_path}")
+                log_message(f"Saved best model with J2J loss {J2J_loss:.4f} and L1 loss {l1_loss:.4f} to {model_path}")
                 no_improve_epochs = 0
             else:
                 no_improve_epochs += 1
@@ -300,6 +302,8 @@ def main():
                         help='Root directory for data')
     
     # 模型参数
+    parser.add_argument('--transformer_name', type=str, default='unified',
+                        choices=['unified', 'pct2'], help='Transformer backbone name')
     parser.add_argument('--feat_dim', type=int, default=256,
                         help='Feature dimension size')
     parser.add_argument('--num_joints', type=int, default=22,

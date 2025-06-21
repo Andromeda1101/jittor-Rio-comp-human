@@ -3,32 +3,50 @@ from jittor import nn
 from jittor.contrib import concat
 from jittor.attention import MultiheadAttention
 from PCT.networks.cls.unifiedpct import UnifiedPointTransformer
+from PCT.networks.cls.pct import Point_Transformer2
 
 class UnifiedModel(nn.Module):
-    def __init__(self, feat_dim=256, num_joints=22):
+    def __init__(self, feat_dim=256, num_joints=22, transformer_name='unified'):
         super().__init__()
         self.feat_dim = feat_dim
         self.num_joints = num_joints
         
-        # 共享的Transformer骨干网络
-        self.transformer = UnifiedPointTransformer(output_channels=feat_dim)
+        if transformer_name == 'unified':
+            # 共享的Transformer骨干网络
+            self.transformer = UnifiedPointTransformer(output_channels=feat_dim)
+        elif transformer_name == 'pct2':
+            self.transformer = Point_Transformer2(output_channels=feat_dim)
         
-        # 骨骼预测分支
-        self.joint_predictor = nn.Sequential(
+        # 增强的骨骼预测分支 - 多尺度特征金字塔
+        self.joint_pyramid = nn.ModuleList([
             nn.Linear(feat_dim, 512),
+            nn.Linear(512, 256),
+            nn.Linear(256, 128),
+            nn.Linear(128, 64)  # 新增更细粒度特征
+        ])
+        
+        # 改进的骨骼预测器
+        self.joint_predictor = nn.Sequential(
+            nn.Linear(512 + 256 + 128 + 64, 512),  # 连接所有多尺度特征
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(512, num_joints * 3)
+            nn.Dropout(p=0.2),  # 降低dropout以保持更多特征
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(256, num_joints * 3)
         )
         
-        # 增强的顶点特征提取
+        # 修改顶点特征提取以适应新的SE模块
         self.vertex_encoder = nn.Sequential(
             nn.Linear(3 + feat_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             ResidualBlock(512, 512),
+            LightweightSE(512),  # 调整后的SE模块
             ResidualBlock(512, 512),
+            LightweightSE(512),  # 调整后的SE模块
             nn.Linear(512, feat_dim)
         )
         
@@ -47,17 +65,22 @@ class UnifiedModel(nn.Module):
             MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
         ])
         
-        # 改进的蒙皮预测分支 - 调整维度处理
+        # 改进的蒙皮预测分支
         self.skin_predictor = nn.Sequential(
-            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),  # 输入通道增加到4倍
+            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),
             nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
+            LightweightSEConv(feat_dim * 2),  # 新增轻量级SE模块
             ResidualConvBlock(feat_dim * 2, feat_dim * 2),
+            LightweightSEConv(feat_dim * 2),  # 新增轻量级SE模块
             ResidualConvBlock(feat_dim * 2, feat_dim),
             nn.BatchNorm1d(feat_dim),
             nn.ReLU(),
             nn.Conv1d(feat_dim, num_joints, 1),
         )
+        
+        # 新增：自适应加权融合模块
+        self.fusion_weights = nn.Parameter(jt.ones(4))  # 4个注意力输出的权重
     
     def _make_res_block(self, in_dim, hidden_dim, out_dim):
         return nn.Sequential(
@@ -71,8 +94,17 @@ class UnifiedModel(nn.Module):
         # 共享特征提取 (B, 3, N) -> (B, feat_dim)
         shape_latent = self.transformer(vertices)
         
-        # 骨骼预测
-        joint_pred = self.joint_predictor(shape_latent).view(-1, self.num_joints, 3)
+        # 骨骼预测 - 使用特征金字塔
+        pyramid_features = []
+        x = shape_latent
+        for layer in self.joint_pyramid:
+            x = layer(x)
+            pyramid_features.append(x)
+        
+        # 连接多尺度特征
+        multi_scale_features = concat(pyramid_features, dim=1)
+        joint_pred = self.joint_predictor(multi_scale_features)
+        joint_pred = joint_pred.view(-1, self.num_joints, 3)
         
         # 蒙皮特征准备
         B, _, N = vertices.shape
@@ -95,12 +127,21 @@ class UnifiedModel(nn.Module):
         att_output2, _ = self.cross_attentions[1](att_output1, joint_feat, joint_feat)
         att_output3, _ = self.cross_attentions[2](att_output2, joint_feat, joint_feat)
 
-        # 特征融合并调整维度
+        # 使用softmax归一化融合权重
+        fusion_weights = nn.softmax(self.fusion_weights)
+        
+        # 确保所有特征具有相同的维度
+        vertex_feat_adj = vertex_feat * fusion_weights[0]
+        att_output1_adj = att_output1 * fusion_weights[1]
+        att_output2_adj = att_output2 * fusion_weights[2]
+        att_output3_adj = att_output3 * fusion_weights[3]
+        
+        # 加权融合特征
         fusion_feat = concat([
-            vertex_feat, 
-            att_output1, 
-            att_output2,
-            att_output3
+            vertex_feat_adj,
+            att_output1_adj,
+            att_output2_adj,
+            att_output3_adj
         ], dim=-1)  # (B, N, feat_dim*3)
         
         # 调整维度以适应Conv1d
@@ -137,6 +178,54 @@ class ResidualBlock(nn.Module):
         out = self.bn2(out)
         out += residual
         return self.relu(out)
+
+# 修改 LightweightSE 模块以修复维度问题
+class LightweightSE(nn.Module):
+    def __init__(self, channel, reduction=8):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+        
+    def execute(self, x):
+        # 处理输入维度 (B*N, C) 或 (B, C)
+        orig_shape = x.shape
+        if len(orig_shape) == 3:
+            # 如果是3D输入，将其压缩为2D
+            B, N, C = orig_shape
+            x = x.reshape(-1, C)
+        
+        # 计算通道注意力
+        y = jt.mean(x, dim=0)  # (C,)
+        y = self.fc(y)  # (C,)
+        
+        # 广播乘法
+        out = x * y
+        
+        # 恢复原始维度
+        if len(orig_shape) == 3:
+            out = out.reshape(orig_shape)
+        return out
+
+# 修改 LightweightSEConv 模块以修复维度问题
+class LightweightSEConv(nn.Module):
+    def __init__(self, channel, reduction=8):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Conv1d(channel, channel // reduction, 1),
+            nn.ReLU(),
+            nn.Conv1d(channel // reduction, channel, 1),
+            nn.Sigmoid()
+        )
+        
+    def execute(self, x):
+        # x shape: (B, C, N)
+        y = jt.mean(x, dim=2, keepdims=True)  # (B, C, 1)
+        y = self.fc(y)  # (B, C, 1)
+        return x * y  # 广播乘法 (B, C, N)
 
 # 新增卷积残差块
 class ResidualConvBlock(nn.Module):
