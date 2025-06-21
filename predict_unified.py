@@ -67,7 +67,7 @@ def predict(args):
             
             path = os.path.join(predict_output_dir, cls[i], str(id[i].item()))
             os.makedirs(path, exist_ok=True)
-            np.save(os.path.join(path, "predict_skeleton"), joint_pred[i].numpy())  # (22, 3)
+            np.save(os.path.join(path, "predict_skeleton"), joint_pred[i])  # (22, 3)
             np.save(os.path.join(path, "predict_skin"), skin_resampled)  # (N, 22)
             np.save(os.path.join(path, "transformed_vertices"), o_vertices)  # (N, 3)
     print("finished")
