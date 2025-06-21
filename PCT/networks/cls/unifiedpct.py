@@ -125,31 +125,36 @@ class SA_Layer(nn.Module):
         self.act = nn.ReLU()
         self.softmax = nn.Softmax(dim=-1)
         
-        # Position encoding
-        self.pos_enc = nn.Conv1d(3, channels, 1)
+        # 简化位置编码实现
+        self.pos_mlp = nn.Sequential(
+            nn.Linear(3, channels),
+            nn.ReLU()
+        )
     
     def execute(self, x, xyz):
         # 输入x: [B*N, S, C], xyz: [B*N, 1, 3]
         B, S, C = x.shape
         
-        # 调整xyz的维度以匹配x的序列长度
+        # 1. 计算位置编码
         xyz = xyz.repeat(1, S, 1)  # [B*N, S, 3]
+        pos_enc = self.pos_mlp(xyz)  # [B*N, S, C]
         
-        # 添加位置编码，先调整维度以适应Conv1d
-        pos = self.pos_enc(xyz.permute(0, 2, 1))  # [B*N, C, S]
+        # 2. 添加位置信息到输入特征
+        x = x + pos_enc  # 直接相加而不是concat
+        
+        # 3. 调整维度进行注意力计算
         x = x.permute(0, 2, 1)  # [B*N, C, S]
-        x = x + pos  # 现在维度匹配，可以相加
         
-        # Self-attention 计算
+        # 4. Self-attention 计算
         x_q = self.q_conv(x).permute(0, 2, 1)  # [B*N, S, C/4]
         x_k = self.k_conv(x)  # [B*N, C/4, S]
         x_v = self.v_conv(x)  # [B*N, C, S]
         
-        # 计算注意力
+        # 5. 计算注意力得分
         energy = nn.bmm(x_q, x_k)  # [B*N, S, S]
-        attention = self.softmax(energy / jt.sqrt(C/4))  # 添加缩放因子
+        attention = self.softmax(energy / jt.sqrt(C/4))
         
-        # 应用注意力
+        # 6. 应用注意力
         x_r = nn.bmm(x_v, attention.permute(0, 2, 1))  # [B*N, C, S]
         x_r = self.trans_conv(x - x_r)
         x_r = self.after_norm(x_r)

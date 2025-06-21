@@ -72,7 +72,7 @@ def train(args):
     )
 
     # 创建损失函数
-    criterion_joint = nn.MSELoss()
+    # criterion_joint = nn.MSELoss()
     criterion_skin_mse = nn.MSELoss()
     criterion_skin_l1 = nn.L1Loss()
 
@@ -102,27 +102,53 @@ def train(args):
         
         return kl_loss + 0.1 * spatial_reg + 0.05 * dist_consistency
     
+    def compute_relative_position_loss(pred, target):
+        """计算相对位置一致性损失"""
+        # 计算所有关节对之间的相对位置
+        pred_rel = pred.unsqueeze(2) - pred.unsqueeze(1)  # [B, J, J, 3]
+        target_rel = target.unsqueeze(2) - target.unsqueeze(1)  # [B, J, J, 3]
+        
+        # 标准化方向向量
+        pred_rel_norm = pred_rel / (jt.norm(pred_rel, dim=-1, keepdim=True) + 1e-6)
+        target_rel_norm = target_rel / (jt.norm(target_rel, dim=-1, keepdim=True) + 1e-6)
+        
+        # 计算方向一致性损失
+        cos_sim = jt.sum(pred_rel_norm * target_rel_norm, dim=-1)
+        dir_loss = jt.mean(1 - cos_sim)
+        
+        # 计算距离一致性损失
+        dist_pred = jt.norm(pred_rel, dim=-1)
+        dist_target = jt.norm(target_rel, dim=-1)
+        dist_loss = nn.mse_loss(dist_pred, dist_target)
+        
+        return dir_loss + 0.1 * dist_loss
+
     def compute_losses(joint_pred, joints, skin_pred, skin, vertices):
         # 基础损失
-        joint_loss = criterion_joint(joint_pred, joints)
+        joint_loss = nn.smooth_l1_loss(joint_pred, joints)
         skin_mseloss = criterion_skin_mse(skin_pred, skin)
         skin_l1loss = criterion_skin_l1(skin_pred, skin)
         skin_klloss = SkinLoss(skin_pred, skin, vertices, joint_pred)
         
-        # 骨骼约束损失
+        # 计算骨骼约束损失，增加权重
         constraint_loss = model.bone_constraints.compute_constraint_loss(joint_pred)
         
-        # 总损失
+        # 新增：计算相对位置一致性损失
+        rel_pos_loss = compute_relative_position_loss(joint_pred, joints)
+        
+        # 总损失，调整权重
         total_loss = (joint_loss + 
                      args.skin_weight * skin_klloss + 
-                     args.constraint_weight * constraint_loss)
+                     args.constraint_weight * constraint_loss +
+                     0.5 * rel_pos_loss)  # 新增相对位置损失
         
         return total_loss, {
             'joint_loss': joint_loss,
             'skin_mse': skin_mseloss,
             'skin_l1': skin_l1loss,
             'skin_kl': skin_klloss,
-            'constraint_loss': constraint_loss
+            'constraint_loss': constraint_loss,
+            'rel_pos_loss': rel_pos_loss
         }
     
     # 创建数据加载器
@@ -244,7 +270,7 @@ def train(args):
                 joints = joints.reshape(joint_pred.shape)  # 确保为 (B, 22, 3)
 
                 # 计算损失
-                joint_loss = criterion_joint(joint_pred, joints)
+                joint_loss = nn.smooth_l1_loss(joint_pred, joints)
                 skin_l1loss = criterion_skin_l1(skin_pred, skin)
                 skin_mseloss = criterion_skin_mse(skin_pred, skin)
 
@@ -355,7 +381,7 @@ def main():
                         help='Gradient accumulation steps')
     parser.add_argument('--skin_temperature', type=float, default=0.1,
                         help='Temperature for skinning softmax')
-    parser.add_argument('--constraint_weight', type=float, default=1.0,
+    parser.add_argument('--constraint_weight', type=float, default=2.0,
                         help='Weight for skeleton constraint loss')
     
     # 输出参数

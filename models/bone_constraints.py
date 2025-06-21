@@ -62,6 +62,29 @@ class BoneConstraints:
             20: (-0.7, 0.7),         # r_foot
             21: (-0.4, 0.4),         # r_toe
         }
+        
+        # 修改：重新定义骨骼链权重，使用完整的链名称作为键
+        self.chain_weights = {
+            'spine': 2.0,    # 脊柱链
+            'l_arm': 1.5,    # 左臂
+            'r_arm': 1.5,    # 右臂
+            'l_leg': 1.5,    # 左腿
+            'r_leg': 1.5     # 右腿
+        }
+        
+        # 骨骼链定义保持不变
+        self.bone_chains = {
+            'spine': [(0,1), (1,2), (2,3), (3,4), (4,5)],
+            'l_arm': [(3,6), (6,7), (7,8), (8,9)],
+            'r_arm': [(3,10), (10,11), (11,12), (12,13)],
+            'l_leg': [(0,14), (14,15), (15,16), (16,17)],
+            'r_leg': [(0,18), (18,19), (19,20), (20,21)]
+        }
+
+        # 验证骨骼链配置
+        for chain_name in self.bone_chains.keys():
+            if chain_name not in self.chain_weights:
+                raise KeyError(f"Weight for chain '{chain_name}' not defined in chain_weights")
 
     def compute_bone_lengths(self, joints):
         """计算所有骨骼长度"""
@@ -100,23 +123,59 @@ class BoneConstraints:
                 
         return joint_angles
 
+    def compute_chain_consistency(self, joints):
+        """计算骨骼链的一致性约束"""
+        chain_loss = jt.array(0.0)
+        
+        for chain_name, bones in self.bone_chains.items():
+            chain_dir = None
+            prev_dir = None
+            
+            for parent, child in bones:
+                curr_dir = joints[:, child] - joints[:, parent]
+                curr_dir = curr_dir / (jt.norm(curr_dir, dim=-1, keepdim=True) + 1e-6)
+                
+                if prev_dir is not None:
+                    # 计算相邻骨骼方向的一致性
+                    cos_sim = jt.sum(prev_dir * curr_dir, dim=-1)
+                    # 确定目标余弦值
+                    target = 0.7 if 'arm' in chain_name or 'leg' in chain_name else 0.9
+                    # 使用完整的chain_name作为键
+                    chain_loss = chain_loss + self.chain_weights[chain_name] * jt.mean((cos_sim - target) ** 2)
+                
+                prev_dir = curr_dir
+        
+        return chain_loss
+
     def compute_constraint_loss(self, joints):
         """计算约束损失"""
         bone_lengths = self.compute_bone_lengths(joints)
         joint_angles = self.compute_joint_angles(joints)
+        chain_loss = self.compute_chain_consistency(joints)
         
         length_loss = jt.array(0.0)
         angle_loss = jt.array(0.0)
         
-        # 骨骼长度约束
+        # 骨骼长度约束（使用smooth L1 loss）
         for bone, lengths in bone_lengths.items():
             min_len, max_len = self.bone_length_ranges[bone]
-            length_loss = length_loss + jt.mean(nn.relu(min_len - lengths) + nn.relu(lengths - max_len))
+            center_len = (min_len + max_len) / 2
+            length_diff = jt.abs(lengths - center_len)
+            length_loss = length_loss + jt.mean(
+                jt.where(length_diff < 1.0,
+                        0.5 * length_diff ** 2,
+                        length_diff - 0.5)
+            )
         
-        # 关节角度约束
+        # 关节角度约束（使用带margin的hinge loss）
         for joint_id, angles in joint_angles.items():
             if joint_id in self.joint_angle_ranges:
                 min_angle, max_angle = self.joint_angle_ranges[joint_id]
-                angle_loss = angle_loss + jt.mean(nn.relu(min_angle - angles) + nn.relu(angles - max_angle))
+                margin = 0.1  # 添加余量
+                angle_loss = angle_loss + jt.mean(
+                    nn.relu(angles - (max_angle - margin)) +
+                    nn.relu((min_angle + margin) - angles)
+                )
         
-        return length_loss + 0.5 * angle_loss
+        # 返回加权组合的损失
+        return length_loss + 2.0 * angle_loss + 1.5 * chain_loss
