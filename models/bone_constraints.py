@@ -105,18 +105,18 @@ class BoneConstraints:
         bone_lengths = self.compute_bone_lengths(joints)
         joint_angles = self.compute_joint_angles(joints)
         
-        length_loss = 0
-        angle_loss = 0
+        length_loss = jt.array(0.0)
+        angle_loss = jt.array(0.0)
         
         # 骨骼长度约束
         for bone, lengths in bone_lengths.items():
             min_len, max_len = self.bone_length_ranges[bone]
-            length_loss = length_loss + nn.relu(min_len - lengths) + nn.relu(lengths - max_len)
+            length_loss = length_loss + jt.mean(nn.relu(min_len - lengths) + nn.relu(lengths - max_len))
         
         # 关节角度约束
         for joint_id, angles in joint_angles.items():
             if joint_id in self.joint_angle_ranges:
                 min_angle, max_angle = self.joint_angle_ranges[joint_id]
-                angle_loss = angle_loss + nn.relu(min_angle - angles) + nn.relu(angles - max_angle)
+                angle_loss = angle_loss + jt.mean(nn.relu(min_angle - angles) + nn.relu(angles - max_angle))
         
         return length_loss + 0.5 * angle_loss
