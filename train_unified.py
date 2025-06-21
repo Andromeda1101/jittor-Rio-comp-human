@@ -78,29 +78,39 @@ def train(args):
 
     # 新的蒙皮损失：KL散度 + 正则化项
     def SkinLoss(pred, target, vertices, joints):
-        # KL散度损失
-        criterion_kl_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
-        kl_loss = criterion_kl_loss(nn.log_softmax(pred, dim=-1), nn.log_softmax(target, dim=-1))
+        B = pred.shape[0]
         
-        # 空间连续性正则化
-        diff = pred[:, 1:, :] - pred[:, :-1, :]
-        spatial_reg = jt.mean(jt.abs(diff))
+        # 计算顶点到关节的距离
+        vertices = vertices.permute(0, 2, 1)  # [B, N, 3]
+        dist = jt.norm(vertices.unsqueeze(2) - joints.unsqueeze(1), dim=-1)  # [B, N, J]
         
-        # 调整vertices形状为(B, N, 3)以进行距离计算
-        vertices = vertices.permute(0, 2, 1)  # 从(B, 3, N)变为(B, N, 3)
+        # 创建距离权重矩阵
+        distance_weight = jt.exp(-dist * 5.0)  # 较大的系数使权重更集中
         
-        # 关节-顶点距离计算 - 使用广播机制
-        # vertices: (B, N, 1, 3)
-        # joints: (B, 1, J, 3)
-        vertices_expanded = vertices.unsqueeze(2)  # (B, N, 1, 3)
-        joints_expanded = joints.unsqueeze(1)      # (B, 1, J, 3)
+        # 计算带权重的KL散度损失
+        criterion_kl = nn.KLDivLoss(reduction='none')
+        kl_loss = criterion_kl(
+            nn.log_softmax(pred, dim=-1),
+            nn.softmax(target, dim=-1)
+        )
+        weighted_kl_loss = (kl_loss * distance_weight).mean()
         
-        # 计算每个顶点到每个关节的距离
-        dist_pred = jt.norm(vertices_expanded - joints_expanded, dim=-1)  # (B, N, J)
-        weight_dist = jt.exp(-dist_pred * 0.5)
-        dist_consistency = nn.mse_loss(pred, weight_dist)
+        # 局部一致性损失
+        spatial_smoothness = jt.abs(pred[:, 1:, :] - pred[:, :-1, :]).mean()
         
-        return kl_loss + 0.1 * spatial_reg + 0.05 * dist_consistency
+        # 稀疏性损失 - 鼓励每个顶点只受少数关节影响
+        sparsity_loss = jt.abs(pred).mean()
+        
+        # 有效性损失 - 确保权重在合理范围内
+        validity_loss = nn.relu(pred - 1.0).mean() + nn.relu(-pred).mean()
+        
+        # 组合损失
+        total_loss = (weighted_kl_loss + 
+                      0.1 * spatial_smoothness + 
+                      0.05 * sparsity_loss + 
+                      0.1 * validity_loss)
+        
+        return total_loss
     
     def compute_relative_position_loss(pred, target):
         """计算相对位置一致性损失"""

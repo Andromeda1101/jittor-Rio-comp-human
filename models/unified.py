@@ -63,19 +63,20 @@ class UnifiedModel(nn.Module):
             MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
         ])
         
-        # 改进的蒙皮预测分支
+        # 修改蒙皮预测分支，添加空间感知
         self.skin_predictor = nn.Sequential(
-            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),
+            SpatialAwareModule(feat_dim * 4, feat_dim * 2),
             nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
-            LightweightSEConv(feat_dim * 2),  # 新增轻量级SE模块
-            ResidualConvBlock(feat_dim * 2, feat_dim * 2),
-            LightweightSEConv(feat_dim * 2),  # 新增轻量级SE模块
-            ResidualConvBlock(feat_dim * 2, feat_dim),
-            nn.BatchNorm1d(feat_dim),
+            LightweightSEConv(feat_dim * 2),
+            LocalityConstrainedPredictor(feat_dim * 2, feat_dim * 2, num_joints),
+            nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
-            nn.Conv1d(feat_dim, num_joints, 1),
+            nn.Conv1d(feat_dim * 2, num_joints, 1),
         )
+        
+        # 添加距离阈值参数
+        self.distance_threshold = 0.3  # 可调整的距离阈值
         
         # 新增：自适应加权融合模块
         self.fusion_weights = nn.Parameter(jt.ones(4))  # 4个注意力输出的权重
@@ -145,15 +146,28 @@ class UnifiedModel(nn.Module):
         # 调整维度以适应Conv1d
         fusion_feat = fusion_feat.permute(0, 2, 1)  # (B, feat_dim*3, N)
         
-        # 改进的距离约束计算
-        vertices_3d = vertices.permute(0, 2, 1)  # (B, N, 3)
-        dist = jt.norm(vertices_3d.unsqueeze(2) - joint_pred.unsqueeze(1), dim=-1)  # (B, N, J)
-        dist_weight = jt.exp(-dist * 0.1)  # 软化的距离权重
+        # 计算每个顶点到关节的距离
+        vertices_3d = vertices.permute(0, 2, 1)  # [B, N, 3]
+        joints_3d = joint_pred  # [B, J, 3]
         
-        # 蒙皮权重预测
-        skin_logits = self.skin_predictor(fusion_feat)  # (B, num_joints, N)
-        skin_weights = nn.softmax(skin_logits * dist_weight.permute(0, 2, 1), dim=1)  # (B, num_joints, N)
-        skin_weights = skin_weights.permute(0, 2, 1)  # (B, N, num_joints)
+        # 计算距离矩阵：[B, N, J]
+        distances = jt.norm(
+            vertices_3d.unsqueeze(2) - joints_3d.unsqueeze(1),
+            dim=-1
+        )
+        
+        # 创建距离掩码
+        distance_mask = jt.exp(-distances * 5.0)  # 软化的距离掩码
+        
+        # 预测蒙皮权重并应用掩码
+        skin_logits = self.skin_predictor(fusion_feat)  # [B, J, N]
+        skin_weights = nn.softmax(skin_logits, dim=1)  # [B, J, N]
+        
+        # 应用距离掩码和重新归一化
+        skin_weights = skin_weights * distance_mask.permute(0, 2, 1)
+        skin_weights = skin_weights / (skin_weights.sum(dim=1, keepdim=True) + 1e-6)
+        
+        skin_weights = skin_weights.permute(0, 2, 1)  # [B, N, J]
         
         return joint_pred, skin_weights
     
@@ -293,3 +307,37 @@ class HierarchicalJointPredictor(nn.Module):
             joint_positions.append(joint_pos)
             
         return jt.stack(joint_positions, dim=1)  # [B, num_joints, 3]
+
+# 新增空间感知模块
+class SpatialAwareModule(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv1d(in_channels, out_channels, 1)
+        self.spatial_gate = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, 1),
+            nn.Sigmoid()
+        )
+        
+    def execute(self, x):
+        feat = self.conv(x)
+        gate = self.spatial_gate(x)
+        return feat * gate
+
+# 新增局部约束预测器
+class LocalityConstrainedPredictor(nn.Module):
+    def __init__(self, in_channels, out_channels, num_joints, k=3):
+        super().__init__()
+        self.k = k
+        self.conv1 = nn.Conv1d(in_channels, out_channels, 1)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, 1)
+        
+    def execute(self, x):
+        # 提取局部特征
+        B, C, N = x.shape
+        
+        # 使用1x1卷积进行特征变换
+        feat = self.conv1(x)
+        feat = nn.relu(feat)
+        feat = self.conv2(feat)
+        
+        return feat
