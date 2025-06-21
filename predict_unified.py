@@ -21,7 +21,8 @@ def predict(args):
     # Create model
     model = UnifiedModel(
         feat_dim=args.feat_dim,
-        num_joints=args.num_joints
+        num_joints=args.num_joints,
+        transformer_name=args.transformer_name
     )
     
     sampler = SamplerMix(num_samples=1024, vertex_samples=512)
@@ -83,6 +84,8 @@ def main():
                         help='Path to the prediction data list file')
     
     # Model parameters
+    parser.add_argument('--transformer_name', type=str, default='unified',
+                        help='Name of the transformer model to use')
     parser.add_argument('--feat_dim', type=int, default=256,
                         help='Feature dimension size')
     parser.add_argument('--num_joints', type=int, default=22,

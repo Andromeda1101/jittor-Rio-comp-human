@@ -2,8 +2,10 @@ import jittor as jt
 from jittor import nn
 from jittor.contrib import concat
 from jittor.attention import MultiheadAttention
+from dataset.format import parents
 from PCT.networks.cls.unifiedpct import UnifiedPointTransformer
 from PCT.networks.cls.pct import Point_Transformer2
+from .bone_constraints import BoneConstraints
 
 class UnifiedModel(nn.Module):
     def __init__(self, feat_dim=256, num_joints=22, transformer_name='unified'):
@@ -25,17 +27,13 @@ class UnifiedModel(nn.Module):
             nn.Linear(128, 64)  # 新增更细粒度特征
         ])
         
-        # 改进的骨骼预测器
-        self.joint_predictor = nn.Sequential(
-            nn.Linear(512 + 256 + 128 + 64, 512),  # 连接所有多尺度特征
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),  # 降低dropout以保持更多特征
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(256, num_joints * 3)
+        # 添加骨骼约束
+        self.bone_constraints = BoneConstraints()
+        
+        # 修改关节预测器，使用分层预测
+        self.joint_predictor = HierarchicalJointPredictor(
+            in_channels=512 + 256 + 128 + 64,
+            num_joints=num_joints
         )
         
         # 修改顶点特征提取以适应新的SE模块
@@ -247,3 +245,51 @@ class ResidualConvBlock(nn.Module):
         out = self.bn2(out)
         out += residual
         return self.relu(out)
+
+class HierarchicalJointPredictor(nn.Module):
+    def __init__(self, in_channels, num_joints):
+        super().__init__()
+        self.num_joints = num_joints
+        
+        # 共享特征提取
+        self.shared_mlp = nn.Sequential(
+            nn.Linear(in_channels, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+        )
+        
+        # 分层预测各个关节
+        self.joint_predictors = nn.ModuleList()
+        for i in range(num_joints):
+            # 每个关节预测器获取父节点信息
+            input_dim = 512 + (3 if parents[i] is not None else 0)
+            self.joint_predictors.append(
+                nn.Sequential(
+                    nn.Linear(input_dim, 256),
+                    nn.ReLU(),
+                    nn.Linear(256, 3)
+                )
+            )
+    
+    def execute(self, x):
+        batch_size = x.shape[0]
+        shared_features = self.shared_mlp(x)
+        
+        # 按照骨骼层次结构预测关节
+        joint_positions = []
+        for i in range(self.num_joints):
+            if parents[i] is None:
+                # 根节点直接预测
+                joint_pos = self.joint_predictors[i](shared_features)
+            else:
+                # 非根节点基于父节点位置预测
+                parent_pos = joint_positions[parents[i]]
+                features = jt.concat([shared_features, parent_pos], dim=1)
+                joint_pos = self.joint_predictors[i](features)
+                # 相对位置预测
+                joint_pos = parent_pos + joint_pos
+                
+            joint_positions.append(joint_pos)
+            
+        return jt.stack(joint_positions, dim=1)  # [B, num_joints, 3]

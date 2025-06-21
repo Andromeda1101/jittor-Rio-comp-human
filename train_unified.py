@@ -15,6 +15,7 @@ from dataset.format import id_to_name, parents
 from dataset.sampler import SamplerMix
 from models.metrics import J2J
 from models.unified import UnifiedModel
+from models.bone_constraints import BoneConstraints
 from dataset.exporter import Exporter
 
 # Set Jittor flags
@@ -101,6 +102,29 @@ def train(args):
         
         return kl_loss + 0.1 * spatial_reg + 0.05 * dist_consistency
     
+    def compute_losses(joint_pred, joints, skin_pred, skin, vertices):
+        # 基础损失
+        joint_loss = criterion_joint(joint_pred, joints)
+        skin_mseloss = criterion_skin_mse(skin_pred, skin)
+        skin_l1loss = criterion_skin_l1(skin_pred, skin)
+        skin_klloss = SkinLoss(skin_pred, skin, vertices, joint_pred)
+        
+        # 骨骼约束损失
+        constraint_loss = model.bone_constraints.compute_constraint_loss(joint_pred)
+        
+        # 总损失
+        total_loss = (joint_loss + 
+                     args.skin_weight * skin_klloss + 
+                     args.constraint_weight * constraint_loss)
+        
+        return total_loss, {
+            'joint_loss': joint_loss,
+            'skin_mse': skin_mseloss,
+            'skin_l1': skin_l1loss,
+            'skin_kl': skin_klloss,
+            'constraint_loss': constraint_loss
+        }
+    
     # 创建数据加载器
     train_loader = get_dataloader(
         data_root=args.data_root,
@@ -135,6 +159,7 @@ def train(args):
         train_skin_l1loss = 0.0
         train_skin_mseloss = 0.0
         train_skin_klloss = 0.0
+        train_constraint_loss = 0.0
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
@@ -154,12 +179,9 @@ def train(args):
             joints = joints.reshape(joint_pred.shape)  # 确保为 (B, 22, 3)
 
             # 计算损失
-            joint_loss = criterion_joint(joint_pred, joints)
-            skin_mseloss = criterion_skin_mse(skin_pred, skin)
-            skin_l1loss = criterion_skin_l1(skin_pred, skin)
-            skin_klloss = SkinLoss(skin_pred, skin, vertices, joint_pred)
-            total_loss = joint_loss + args.skin_weight * skin_klloss
+            total_loss, losses = compute_losses(joint_pred, joints, skin_pred, skin, vertices)
             total_loss /= args.accum_steps
+            
             # 反向传播
             optimizer.zero_grad()
             optimizer.backward(total_loss)
@@ -171,15 +193,16 @@ def train(args):
                 lr_scheduler.step()  # 更新学习率
             
             # 记录损失
-            train_joint_loss += joint_loss.item()
-            train_skin_l1loss += skin_l1loss.item()
-            train_skin_mseloss += skin_mseloss.item()
-            train_skin_klloss += skin_klloss.item()
+            train_joint_loss += losses['joint_loss'].item()
+            train_skin_l1loss += losses['skin_l1'].item()
+            train_skin_mseloss += losses['skin_mse'].item()
+            train_skin_klloss += losses['skin_kl'].item()
+            train_constraint_loss += losses['constraint_loss'].item()
             
             # 打印进度
             if (batch_idx + 1) % args.print_freq == 0:
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                          f"Joint Loss: {joint_loss.item():.4f} Skin MSE Loss: {skin_mseloss.item():.4f} Skin L1 Loss: {skin_l1loss.item():.4f} Skin KL Loss: {skin_klloss.item():.4f}")
+                          f"Joint Loss: {losses['joint_loss'].item():.4f} Skin MSE Loss: {losses['skin_mse'].item():.4f} Skin L1 Loss: {losses['skin_l1'].item():.4f} Skin KL Loss: {losses['skin_kl'].item():.4f} Constraint Loss: {losses['constraint_loss'].item():.4f}")
         
 
         # 计算epoch统计
@@ -187,6 +210,7 @@ def train(args):
         train_skin_mseloss /= len(train_loader)
         train_skin_l1loss /= len(train_loader)
         train_skin_klloss /= len(train_loader)
+        train_constraint_loss /= len(train_loader)
         epoch_time = time.time() - start_time
         
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
@@ -194,6 +218,7 @@ def train(args):
                    f"Train Skin MSE Loss: {train_skin_mseloss:.4f} "
                    f"Train Skin L1 Loss: {train_skin_l1loss:.4f} "
                    f"Train Skin KL Loss: {train_skin_klloss:.4f} "
+                   f"Train Constraint Loss: {train_constraint_loss:.4f} "
                    f"Time: {epoch_time:.2f}s")
         
         # 验证阶段
@@ -257,7 +282,7 @@ def train(args):
             l1_loss /= len(val_loader)
             mse_loss /= len(val_loader)
             J2J_loss /= len(val_loader)
-            val_loss = J2J_loss + args.skin_weight * l1_loss
+            val_loss = J2J_loss + 0.8 * args.skin_weight * l1_loss
             
             log_message(f"Validation J2J Loss: {J2J_loss:.4f} "
                       f"Skin MSE Loss: {mse_loss:.4f} "
@@ -324,12 +349,14 @@ def main():
                         help='Momentum for SGD')
     parser.add_argument('--optimizer', type=str, default='adamw',
                         choices=['sgd', 'adam','adamw'], help='Optimizer type')
-    parser.add_argument('--skin_weight', type=float, default=2.0,
+    parser.add_argument('--skin_weight', type=float, default=1.0,
                         help='Weight for skin loss')
     parser.add_argument('--accum_steps', type=int, default=4,
                         help='Gradient accumulation steps')
     parser.add_argument('--skin_temperature', type=float, default=0.1,
                         help='Temperature for skinning softmax')
+    parser.add_argument('--constraint_weight', type=float, default=1.0,
+                        help='Weight for skeleton constraint loss')
     
     # 输出参数
     parser.add_argument('--output_dir', type=str, required=True,
