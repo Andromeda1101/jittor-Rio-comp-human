@@ -8,6 +8,7 @@ import wandb
 
 from jittor import nn
 from jittor import optim
+from jittor.lr_scheduler import CosineAnnealingLR
 
 from dataset.dataset import get_dataloader, transform
 from dataset.format import id_to_name, parents
@@ -53,15 +54,51 @@ def train(args):
                              lr=args.learning_rate, 
                              momentum=args.momentum, 
                              weight_decay=args.weight_decay)
-    else:  # 默认使用Adam
+    elif args.optimizer == 'adam': 
         optimizer = optim.Adam(model.parameters(), 
                               lr=args.learning_rate, 
                               weight_decay=args.weight_decay)
+    elif args.optimizer == 'adamw':
+        optimizer = optim.AdamW(model.parameters(), 
+                               lr=args.learning_rate, 
+                               weight_decay=args.weight_decay)
     
+    lr_scheduler = CosineAnnealingLR(
+        optimizer, 
+        T_max=args.epochs//4,  # 每1/4训练周期重启一次
+        eta_min=args.learning_rate/100
+    )
+
     # 创建损失函数
     criterion_joint = nn.MSELoss()
     criterion_skin_mse = nn.MSELoss()
     criterion_skin_l1 = nn.L1Loss()
+
+    # 新的蒙皮损失：KL散度 + 正则化项
+    def SkinLoss(pred, target, vertices, joints):
+        # KL散度损失
+        criterion_kl_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
+        kl_loss = criterion_kl_loss(nn.log_softmax(pred, dim=-1), nn.log_softmax(target, dim=-1))
+        
+        # 空间连续性正则化
+        diff = pred[:, 1:, :] - pred[:, :-1, :]
+        spatial_reg = jt.mean(jt.abs(diff))
+        
+        # 调整vertices形状为(B, N, 3)以进行距离计算
+        vertices = vertices.permute(0, 2, 1)  # 从(B, 3, N)变为(B, N, 3)
+        
+        # 关节-顶点距离计算 - 使用广播机制
+        # vertices: (B, N, 1, 3)
+        # joints: (B, 1, J, 3)
+        vertices_expanded = vertices.unsqueeze(2)  # (B, N, 1, 3)
+        joints_expanded = joints.unsqueeze(1)      # (B, 1, J, 3)
+        
+        # 计算每个顶点到每个关节的距离
+        dist_pred = jt.norm(vertices_expanded - joints_expanded, dim=-1)  # (B, N, J)
+        weight_dist = jt.exp(-dist_pred * 0.5)
+        dist_consistency = nn.mse_loss(pred, weight_dist)
+        
+        return kl_loss + 0.1 * spatial_reg + 0.05 * dist_consistency
     
     # 创建数据加载器
     train_loader = get_dataloader(
@@ -96,6 +133,7 @@ def train(args):
         train_joint_loss = 0.0
         train_skin_l1loss = 0.0
         train_skin_mseloss = 0.0
+        train_skin_klloss = 0.0
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
@@ -104,8 +142,9 @@ def train(args):
             joints: jt.Var
             skin: jt.Var
 
-            # 调整输入形状
-            vertices = vertices.permute(0, 2, 1)  # (B, 3, N) - 输入要求
+            # 确保vertices的形状为(B, 3, N)
+            if vertices.shape[1] != 3:
+                vertices = vertices.permute(0, 2, 1)
             
             # 前向传播
             joint_pred, skin_pred = model(vertices)  # 输出 (B, 22, 3), (B, N, 22)
@@ -117,34 +156,43 @@ def train(args):
             joint_loss = criterion_joint(joint_pred, joints)
             skin_mseloss = criterion_skin_mse(skin_pred, skin)
             skin_l1loss = criterion_skin_l1(skin_pred, skin)
-            skin_loss = skin_mseloss + skin_l1loss
-            total_loss = joint_loss + args.skin_weight * skin_loss
-            
+            skin_klloss = SkinLoss(skin_pred, skin, vertices, joint_pred)
+            total_loss = joint_loss + args.skin_weight * skin_klloss
+            total_loss /= args.accum_steps
             # 反向传播
             optimizer.zero_grad()
             optimizer.backward(total_loss)
             optimizer.step()
             
+            if (batch_idx + 1) % args.accum_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                lr_scheduler.step()  # 更新学习率
+            
             # 记录损失
             train_joint_loss += joint_loss.item()
             train_skin_l1loss += skin_l1loss.item()
             train_skin_mseloss += skin_mseloss.item()
+            train_skin_klloss += skin_klloss.item()
             
             # 打印进度
             if (batch_idx + 1) % args.print_freq == 0:
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                          f"Joint Loss: {joint_loss.item():.4f} Skin MSE Loss: {skin_mseloss.item():.4f} Skin L1 Loss: {skin_l1loss.item():.4f}")
+                          f"Joint Loss: {joint_loss.item():.4f} Skin MSE Loss: {skin_mseloss.item():.4f} Skin L1 Loss: {skin_l1loss.item():.4f} Skin KL Loss: {skin_klloss.item():.4f}")
         
+
         # 计算epoch统计
         train_joint_loss /= len(train_loader)
         train_skin_mseloss /= len(train_loader)
         train_skin_l1loss /= len(train_loader)
+        train_skin_klloss /= len(train_loader)
         epoch_time = time.time() - start_time
         
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
                    f"Train Joint Loss: {train_joint_loss:.4f} "
                    f"Train Skin MSE Loss: {train_skin_mseloss:.4f} "
                    f"Train Skin L1 Loss: {train_skin_l1loss:.4f} "
+                   f"Train Skin KL Loss: {train_skin_klloss:.4f} "
                    f"Time: {epoch_time:.2f}s")
         
         # 验证阶段
@@ -209,9 +257,10 @@ def train(args):
             mse_loss /= len(val_loader)
             total_val_loss = val_joint_loss + args.skin_weight * (l1_loss + mse_loss)
             
-            log_message(f"Validation Joint Loss: {val_joint_loss:.4f} "
+            log_message(f"Validation J2J Loss: {val_joint_loss:.4f} "
+                      f"Skin MSE Loss: {mse_loss:.4f} "
                       f"Skin L1 Loss: {l1_loss:.4f} "
-                      f"Skin MSE Loss: {mse_loss:.4f} ")
+                      )
             
             # 保存最佳模型
             if l1_loss < best_loss:
@@ -269,15 +318,19 @@ def main():
                         help='Weight decay')
     parser.add_argument('--momentum', type=float, default=0.9,
                         help='Momentum for SGD')
-    parser.add_argument('--optimizer', type=str, default='sgd',
-                        choices=['sgd', 'adam'], help='Optimizer type')
+    parser.add_argument('--optimizer', type=str, default='adamw',
+                        choices=['sgd', 'adam','adamw'], help='Optimizer type')
     parser.add_argument('--skin_weight', type=float, default=2.0,
                         help='Weight for skin loss')
+    parser.add_argument('--accum_steps', type=int, default=4,
+                        help='Gradient accumulation steps')
+    parser.add_argument('--skin_temperature', type=float, default=0.1,
+                        help='Temperature for skinning softmax')
     
     # 输出参数
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Output directory')
-    parser.add_argument('--print_freq', type=int, default=10,
+    parser.add_argument('--print_freq', type=int, default=50,
                         help='Print frequency')
     parser.add_argument('--save_freq', type=int, default=10,
                         help='Save frequency')
