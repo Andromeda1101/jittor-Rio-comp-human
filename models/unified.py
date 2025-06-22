@@ -84,6 +84,16 @@ class UnifiedModel(nn.Module):
         
         # 添加蒙皮约束
         self.skin_constraints = SkinConstraints()
+        
+        # 添加约束网络
+        self.constraint_net = ConstraintNetwork(feat_dim, num_joints)
+        
+        # 调整损失权重
+        self.constraint_weights = {
+            'symmetry': 1.0,
+            'planarity': 0.8,
+            'chain': 1.2
+        }
     
     def _make_res_block(self, in_dim, hidden_dim, out_dim):
         return nn.Sequential(
@@ -109,8 +119,36 @@ class UnifiedModel(nn.Module):
         joint_pred = self.joint_predictor(multi_scale_features)
         joint_pred = joint_pred.view(-1, self.num_joints, 3)
         
-        # 蒙皮特征准备
+        # 约束网络处理
         B, _, N = vertices.shape
+        constraint_input = jt.concat([
+            shape_latent,
+            joint_pred.reshape(B, -1)  # 展平关节预测
+        ], dim=1)
+        
+        constraint_feat = self.constraint_net.constraint_encoder(constraint_input)
+        
+        # 预测各类约束调整
+        symmetry_adjust = self.constraint_net.symmetry_predictor(constraint_feat)
+        planarity_adjust = self.constraint_net.planarity_predictor(constraint_feat)
+        chain_adjust = self.constraint_net.chain_predictor(constraint_feat)
+        
+        # 将调整reshape为关节形状
+        symmetry_adjust = symmetry_adjust.view(B, self.num_joints, 3)
+        planarity_adjust = planarity_adjust.view(B, self.num_joints, 3)
+        chain_adjust = chain_adjust.view(B, self.num_joints, 3)
+        
+        # 应用约束调整
+        joint_adjust = (
+            self.constraint_weights['symmetry'] * symmetry_adjust +
+            self.constraint_weights['planarity'] * planarity_adjust +
+            self.constraint_weights['chain'] * chain_adjust
+        )
+        
+        # 软约束：通过残差连接应用调整
+        joint_pred = joint_pred + 0.1 * joint_adjust  # 使用小权重确保平滑调整
+        
+        # 蒙皮特征准备
         vertices_flat = vertices.permute(0, 2, 1).reshape(B * N, 3)
         shape_latent_exp = shape_latent.unsqueeze(1).repeat(1, N, 1).reshape(B * N, -1)
         
@@ -348,3 +386,23 @@ class LocalityConstrainedPredictor(nn.Module):
         feat = self.conv2(feat)
         
         return feat
+
+# 新增约束网络
+class ConstraintNetwork(nn.Module):
+    def __init__(self, feat_dim=256, num_joints=22):
+        super().__init__()
+        self.num_joints = num_joints
+        
+        # 骨架约束感知网络
+        self.constraint_encoder = nn.Sequential(
+            nn.Linear(feat_dim + num_joints * 3, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            ResidualBlock(512, 512),
+            nn.Linear(512, 256)
+        )
+        
+        # 各部分约束预测器
+        self.symmetry_predictor = nn.Linear(256, num_joints * 3)
+        self.planarity_predictor = nn.Linear(256, num_joints * 3)
+        self.chain_predictor = nn.Linear(256, num_joints * 3)

@@ -315,30 +315,37 @@ class BoneConstraints:
 
     def compute_planarity_loss(self, joints):
         """计算骨架的平面性损失（除脚趾外）"""
-        # 选择参与平面性计算的关节
         planar_joints = joints[:, self.planarity_joints]
         B = joints.shape[0]
         
-        # 对每个批次单独计算
         total_loss = 0
         for i in range(B):
-            # 计算最佳拟合平面的法向量
-            centered = planar_joints[i] - jt.mean(planar_joints[i], dim=0, keepdim=True)
-            _, _, vh = jt.linalg.svd(centered)
-            normal = vh[-1]  # 最小特征值对应的向量为法向量
+            # 计算质心
+            centroid = jt.mean(planar_joints[i], dim=0, keepdim=True)
+            centered = planar_joints[i] - centroid
             
-            # 计算每个点到平面的距离
-            distances = jt.abs(jt.matmul(centered, normal))
+            # 计算协方差矩阵
+            cov = jt.matmul(centered.transpose(1, 0), centered)
             
-            # 使用软约束：允许少量偏离平面
+            # 使用特征值分解的近似方法
+            # 通过幂迭代法找到主方向
+            v = jt.randn(3)
+            for _ in range(10):  # 通常10次迭代足够
+                v = jt.matmul(cov, v)
+                v = v / (jt.norm(v) + 1e-8)
+            
+            # 计算到拟合平面的距离
+            distances = jt.abs(jt.sum(centered * v, dim=1))
+            
+            # 使用软约束
             soft_distances = jt.where(
-                distances > 0.05,  # 允许5cm的偏离
+                distances > 0.05,
                 (distances - 0.05) ** 2,
                 jt.zeros_like(distances)
             )
             
             total_loss += jt.mean(soft_distances)
-            
+        
         return total_loss / B
 
     def compute_constraint_loss(self, joints):
