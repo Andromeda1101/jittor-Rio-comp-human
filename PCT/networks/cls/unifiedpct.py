@@ -132,33 +132,42 @@ class SA_Layer(nn.Module):
         )
     
     def execute(self, x, xyz):
-        # 输入x: [B*N, S, C], xyz: [B*N, 1, 3]
+        # Input x: [B*N, S, C], xyz: [B*N, 1, 3]
         B, S, C = x.shape
         
-        # 1. 计算位置编码
+        # 1. Position encoding with gradient tracking
         xyz = xyz.repeat(1, S, 1)  # [B*N, S, 3]
         pos_enc = self.pos_mlp(xyz)  # [B*N, S, C]
         
-        # 2. 添加位置信息到输入特征
-        x = x + pos_enc  # 直接相加而不是concat
+        # 2. Add position encoding with gradient tracking
+        x = x + pos_enc  # Direct addition for better gradient flow
         
-        # 3. 调整维度进行注意力计算
-        x = x.permute(0, 2, 1)  # [B*N, C, S]
+        # 3. Adjust dimensions for attention with gradient tracking
+        x_t = x.permute(0, 2, 1)  # [B*N, C, S]
         
-        # 4. Self-attention 计算
-        x_q = self.q_conv(x).permute(0, 2, 1)  # [B*N, S, C/4]
-        x_k = self.k_conv(x)  # [B*N, C/4, S]
-        x_v = self.v_conv(x)  # [B*N, C, S]
+        # 4. Self-attention computation with gradient tracking
+        q = self.q_conv(x_t)  # [B*N, C/4, S]
+        k = self.k_conv(x_t)  # [B*N, C/4, S]
+        v = self.v_conv(x_t)  # [B*N, C, S]
         
-        # 5. 计算注意力得分
-        energy = nn.bmm(x_q, x_k)  # [B*N, S, S]
-        attention = self.softmax(energy / jt.sqrt(C/4))
+        # Reshape for attention computation
+        q = q.permute(0, 2, 1)  # [B*N, S, C/4]
         
-        # 6. 应用注意力
-        x_r = nn.bmm(x_v, attention.permute(0, 2, 1))  # [B*N, C, S]
-        x_r = self.trans_conv(x - x_r)
+        # 5. Compute attention scores with gradient tracking
+        energy = nn.bmm(q, k)  # [B*N, S, S]
+        attention = self.softmax(energy / jt.sqrt(float(C/4)))
+        
+        # 6. Apply attention with gradient tracking
+        x_r = nn.bmm(v, attention.permute(0, 2, 1))  # [B*N, C, S]
+        x_r = self.trans_conv(x_t - x_r)
         x_r = self.after_norm(x_r)
         x_r = self.act(x_r)
-        x = x + x_r
         
-        return x.permute(0, 2, 1)  # [B*N, S, C]
+        # Residual connection with gradient tracking
+        out = x_t + x_r
+        
+        # Ensure gradients are preserved
+        out = out.permute(0, 2, 1)  # [B*N, S, C]
+        out.sync()
+        
+        return out

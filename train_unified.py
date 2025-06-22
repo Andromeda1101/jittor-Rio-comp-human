@@ -5,6 +5,7 @@ import argparse
 import time
 import random
 import wandb
+import gc
 
 from jittor import nn
 from jittor import optim
@@ -22,6 +23,10 @@ from dataset.exporter import Exporter
 jt.flags.use_cuda = 1
 
 def train(args):
+    # 在训练开始前清理GPU内存
+    jt.gc()
+    jt.sync_all()
+    
     # 初始化wandb
     # wandb.init(project="unified-model", config=vars(args))
     
@@ -78,42 +83,63 @@ def train(args):
 
     # 新的蒙皮损失：KL散度 + 正则化项
     def SkinLoss(pred, target, vertices, joints):
-        B = pred.shape[0]
+        # KL散度损失
+        criterion_kl_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
+        kl_loss = criterion_kl_loss(nn.log_softmax(pred, dim=-1), nn.log_softmax(target, dim=-1))
         
-        # 计算顶点到关节的距离
-        vertices = vertices.permute(0, 2, 1)  # [B, N, 3]
-        dist = jt.norm(vertices.unsqueeze(2) - joints.unsqueeze(1), dim=-1)  # [B, N, J]
+        # 空间连续性正则化
+        diff = pred[:, 1:, :] - pred[:, :-1, :]
+        spatial_reg = jt.mean(jt.abs(diff))
         
-        # 创建距离权重矩阵
-        distance_weight = jt.exp(-dist * 5.0)  # 较大的系数使权重更集中
+        # 调整vertices形状为(B, N, 3)以进行距离计算
+        vertices = vertices.permute(0, 2, 1)  # 从(B, 3, N)变为(B, N, 3)
         
-        # 计算带权重的KL散度损失
-        criterion_kl = nn.KLDivLoss(reduction='none')
-        kl_loss = criterion_kl(
-            nn.log_softmax(pred, dim=-1),
-            nn.softmax(target, dim=-1)
-        )
-        weighted_kl_loss = (kl_loss * distance_weight).mean()
+        # 关节-顶点距离计算 - 使用广播机制
+        # vertices: (B, N, 1, 3)
+        # joints: (B, 1, J, 3)
+        vertices_expanded = vertices.unsqueeze(2)  # (B, N, 1, 3)
+        joints_expanded = joints.unsqueeze(1)      # (B, 1, J, 3)
         
-        return weighted_kl_loss
+        # 计算每个顶点到每个关节的距离
+        dist_pred = jt.norm(vertices_expanded - joints_expanded, dim=-1)  # (B, N, J)
+        weight_dist = jt.exp(-dist_pred * 0.5)
+        dist_consistency = nn.mse_loss(pred, weight_dist)
+        
+        return kl_loss + 0.1 * spatial_reg + 0.05 * dist_consistency
 
     def compute_losses(joint_pred, joints, skin_pred, skin, vertices):
         # 基础损失
-        joint_loss = nn.smooth_l1_loss(joint_pred, joints)
+        # 改用Huber Loss并加入自适应权重
+        joint_diff = joint_pred - joints
+        abs_diff = jt.abs(joint_diff)
+        quadratic = jt.minimum(abs_diff, 1.0)
+        linear = abs_diff - quadratic
+        joint_loss = jt.mean(0.5 * quadratic ** 2 + linear)
+        
+        # 加入自适应权重 - 根据重要性给不同关节更多权重
+        joint_weights = jt.ones_like(joints)
+        # 给予躯干(脊柱链)更高的权重
+        joint_weights[:, 0:6] *= 2.0  # hips到head
+        # 给予末端关节(手、脚)更高的权重以提高准确性
+        joint_weights[:, [9, 13, 17, 21]] *= 1.5  # 手和脚趾
+        
+        weighted_joint_loss = (joint_loss * joint_weights).mean()
+        
+        # 计算skin损失
         skin_mseloss = criterion_skin_mse(skin_pred, skin)
         skin_l1loss = criterion_skin_l1(skin_pred, skin)
         skin_klloss = SkinLoss(skin_pred, skin, vertices, joints)
         
-        # 计算基本骨骼约束损失
+        # 计算基本骨骼约束损失并增加权重
         constraint_loss = model.bone_constraints.compute_constraint_loss(joint_pred)
         
-        # 移除相对距离损失,保留基本损失
-        total_loss = (joint_loss + 
-                      args.skin_weight * skin_klloss +  
-                      args.constraint_weight * constraint_loss)
+        # 调整损失权重
+        total_loss = (weighted_joint_loss + 
+                     args.skin_weight * skin_klloss +  
+                     args.constraint_weight * constraint_loss)
         
         return total_loss, {
-            'joint_loss': joint_loss,
+            'joint_loss': weighted_joint_loss,
             'skin_mse': skin_mseloss,
             'skin_l1': skin_l1loss,
             'skin_kl': skin_klloss,
@@ -159,17 +185,31 @@ def train(args):
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
+            # 每50个batch清理一次GPU内存
+            if batch_idx > 0 and batch_idx % 50 == 0:
+                jt.sync_all()
+                jt.gc()
+                # 强制Python垃圾回收
+                gc.collect()
+                
             vertices, joints, skin = data['vertices'], data['joints'], data['skin']
-            vertices: jt.Var
-            joints: jt.Var
-            skin: jt.Var
 
-            # 确保vertices的形状为(B, 3, N)
-            if vertices.shape[1] != 3:
-                vertices = vertices.permute(0, 2, 1)
+            # 确保输入维度正确
+            if vertices.ndim == 3:
+                if vertices.shape[1] == 3:  # 如果已经是(B, 3, N)格式
+                    pass
+                else:  # 如果是(B, N, 3)格式
+                    vertices = vertices.permute(0, 2, 1)  # 转换为(B, 3, N)
+            
+            # 打印维度信息进行调试
+            if batch_idx == 0:
+                print(f"Input shapes - vertices: {vertices.shape}, joints: {joints.shape}, skin: {skin.shape}")
             
             # 前向传播
-            joint_pred, skin_pred = model(vertices)  # 输出 (B, 22, 3), (B, N, 22)
+            joint_pred, skin_pred = model(vertices)  # 预期输出 (B, 22, 3), (B, N, 22)
+            
+            if batch_idx == 0:
+                print(f"Output shapes - joint_pred: {joint_pred.shape}, skin_pred: {skin_pred.shape}")
             
             # 调整joints格式以匹配预测结果
             joints = joints.reshape(joint_pred.shape)  # 确保为 (B, 22, 3)
@@ -181,12 +221,16 @@ def train(args):
             # 反向传播
             optimizer.zero_grad()
             optimizer.backward(total_loss)
-            optimizer.step()
             
             if (batch_idx + 1) % args.accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
                 lr_scheduler.step()  # 更新学习率
+            
+            # 释放不需要的临时变量
+            del total_loss
+            del joint_pred
+            del skin_pred
             
             # 记录损失
             train_joint_loss += losses['joint_loss'].item()
@@ -201,6 +245,11 @@ def train(args):
                           f"Joint Loss: {losses['joint_loss'].item():.4f} Skin MSE Loss: {losses['skin_mse'].item():.4f} Skin L1 Loss: {losses['skin_l1'].item():.4f} Skin KL Loss: {losses['skin_kl'].item():.4f} Constraint Loss: {losses['constraint_loss'].item():.4f}")
         
 
+        # 每个epoch结束后清理GPU内存
+        jt.sync_all()
+        jt.gc()
+        gc.collect()
+        
         # 计算epoch统计
         train_joint_loss /= len(train_loader)
         train_skin_mseloss /= len(train_loader)
@@ -325,7 +374,7 @@ def main():
     # 模型参数
     parser.add_argument('--transformer_name', type=str, default='unified',
                         choices=['unified', 'pct2'], help='Transformer backbone name')
-    parser.add_argument('--feat_dim', type=int, default=256,
+    parser.add_argument('--feat_dim', type=int, default=512,
                         help='Feature dimension size')
     parser.add_argument('--num_joints', type=int, default=22,
                         help='Number of joints')

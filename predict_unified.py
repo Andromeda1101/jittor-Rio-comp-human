@@ -86,7 +86,7 @@ def main():
     # Model parameters
     parser.add_argument('--transformer_name', type=str, default='unified',
                         help='Name of the transformer model to use')
-    parser.add_argument('--feat_dim', type=int, default=256,
+    parser.add_argument('--feat_dim', type=int, default=512,
                         help='Feature dimension size')
     parser.add_argument('--num_joints', type=int, default=22,
                         help='Number of joints')

@@ -8,213 +8,191 @@ from PCT.networks.cls.pct import Point_Transformer2
 from .bone_constraints import BoneConstraints
 
 class UnifiedModel(nn.Module):
-    def __init__(self, feat_dim=256, num_joints=22, transformer_name='unified'):
+    def __init__(self, feat_dim=512, num_joints=22, transformer_name='unified'):
         super().__init__()
         self.feat_dim = feat_dim
         self.num_joints = num_joints
         
+        # 1. 增强骨干网络
         if transformer_name == 'unified':
-            # 共享的Transformer骨干网络
             self.transformer = UnifiedPointTransformer(output_channels=feat_dim)
         elif transformer_name == 'pct2':
             self.transformer = Point_Transformer2(output_channels=feat_dim)
-        
-        # 增强的骨骼预测分支 - 多尺度特征金字塔
+            
+        # 2. 多尺度特征提取
         self.joint_pyramid = nn.ModuleList([
-            nn.Linear(feat_dim, 512),
-            nn.Linear(512, 256),
-            nn.Linear(256, 128),
-            nn.Linear(128, 64)  # 新增更细粒度特征
+            nn.Sequential(
+                nn.Linear(feat_dim, feat_dim // 2),  # 改为输出feat_dim//2
+                nn.LayerNorm(feat_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            ),
+            nn.Sequential(
+                nn.Linear(feat_dim // 2, feat_dim // 4),  # 改为输出feat_dim//4
+                nn.LayerNorm(feat_dim // 4),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            ),
+            nn.Sequential(
+                nn.Linear(feat_dim // 4, feat_dim // 8),  # 改为输出feat_dim//8
+                nn.LayerNorm(feat_dim // 8),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            )
         ])
-        
-        # 添加骨骼约束
-        self.bone_constraints = BoneConstraints()
-        
-        # 修改关节预测器，使用分层预测
+
+        self.pyramid_proj = nn.Linear(
+            (feat_dim // 2) + (feat_dim // 4) + (feat_dim // 8),
+            feat_dim
+        )
+
+        # 3. 点云特征提取增强 - 修改输入维度处理
+        self.point_feature_net = nn.Sequential(
+            nn.Linear(3 + feat_dim, feat_dim * 2),  # [B, N, 3+feat_dim*2] -> [B, N, feat_dim*2]
+            nn.LayerNorm(feat_dim * 2),
+            nn.ReLU(),
+            nn.Linear(feat_dim * 2, feat_dim),
+            nn.LayerNorm(feat_dim),
+            nn.ReLU(),
+        )
+
+        # 4. 层次化关节预测器
         self.joint_predictor = HierarchicalJointPredictor(
-            in_channels=512 + 256 + 128 + 64,
+            in_channels=feat_dim * 4,
             num_joints=num_joints
         )
-        
-        # 修改顶点特征提取以适应新的SE模块
-        self.vertex_encoder = nn.Sequential(
-            nn.Linear(3 + feat_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            ResidualBlock(512, 512),
-            LightweightSE(512),  # 调整后的SE模块
-            ResidualBlock(512, 512),
-            LightweightSE(512),  # 调整后的SE模块
-            nn.Linear(512, feat_dim)
-        )
-        
-        # 修改多尺度骨骼特征提取
-        self.joint_features = nn.ModuleList([
-            self._make_res_block(3, 64),
-            self._make_res_block(64, 128),
-            self._make_res_block(128, 256),
-            self._make_res_block(256, feat_dim//4)
+
+        # 5. 跨模态注意力融合
+        self.cross_attention = nn.ModuleList([
+            MultiheadAttention(feat_dim, 8, batch_first=True),  # 第一个注意力层
+            MultiheadAttention(feat_dim, 8, batch_first=True)   # 第二个注意力层
         ])
-        
-        # 层次化交叉注意力
-        self.cross_attentions = nn.ModuleList([
-            MultiheadAttention(feat_dim, num_heads=8, batch_first=True),
-            MultiheadAttention(feat_dim, num_heads=8, batch_first=True),
-            MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
-        ])
-        
-        # 添加维度转换辅助层
-        self.vertex_feature_transform = nn.Sequential(
-            nn.Linear(3 + feat_dim, feat_dim * 4),
-            nn.BatchNorm1d(feat_dim * 4),
-            nn.ReLU(),
-            nn.Linear(feat_dim * 4, feat_dim * 4)  # 添加额外线性层
+
+        # 6. 条件特征生成器 - 调整维度
+        self.feature_adapter = nn.Sequential(
+            nn.Linear(feat_dim * 2, feat_dim),
+            nn.LayerNorm(feat_dim),
+            nn.ReLU()
         )
-        
-        # 修改蒙皮预测分支的输入维度处理
+
+        self.condition_generator = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
+            nn.LayerNorm(feat_dim),
+            nn.ReLU(),
+            nn.Linear(feat_dim, feat_dim),
+            nn.LayerNorm(feat_dim),
+            nn.Tanh()
+        )
+
+        # 7. 骨架约束感知模块
+        self.bone_constraints = BoneConstraints()
+        self.constraint_encoder = nn.Sequential(
+            nn.Linear(num_joints * 3, feat_dim),
+            nn.LayerNorm(feat_dim),
+            nn.ReLU(),
+            nn.Linear(feat_dim, feat_dim)
+        )
+
+        # 8. 蒙皮预测
         self.skin_predictor = nn.Sequential(
-            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),
+            nn.Conv1d(feat_dim * 2, feat_dim * 2, 1),
             nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
             ResidualConvBlock(feat_dim * 2, feat_dim * 2),
             ResidualConvBlock(feat_dim * 2, feat_dim),
             nn.Conv1d(feat_dim, num_joints, 1)
         )
-        
-        # 修改fusion_weights初始化方式
-        self.fusion_weights = jt.array([1.0, 1.0, 1.0, 1.0]).float()
-        self.fusion_weights.requires_grad = True
-        
-        self.constraint_net = ConstraintNetwork(feat_dim, num_joints)
-        self.constraint_weights = {
-            'symmetry': 1.0,
-            'planarity': 0.8
-        }
-        
-        # 修改参数初始化方式
-        def init_weights(m):
+
+        # 初始化
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
             if isinstance(m, nn.Linear):
                 m.weight = jt.init.xavier_gauss_(m.weight)
                 if m.bias is not None:
                     m.bias.zero_()
-                m.weight.requires_grad = True
+            elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
                 if m.bias is not None:
-                    m.bias.requires_grad = True
-        
-        # 应用初始化
-        self.apply(init_weights)
-        
+                    m.bias.zero_()
+                if m.weight is not None:
+                    m.weight.fill_(1.0)
+
         # 确保所有参数可训练
         for p in self.parameters():
             p.requires_grad = True
 
-    def _make_res_block(self, in_dim, out_dim):
-        return nn.Sequential(
-            ResidualBlock(in_dim, out_dim),
-            nn.LayerNorm(out_dim),  # 添加LayerNorm
-            nn.Linear(out_dim, out_dim)
-        )
-
     def execute(self, vertices):
-        # 确保输入张量格式正确且有梯度
         vertices = vertices.float()
-        vertices.requires_grad = True
         B, _, N = vertices.shape
         
-        # 使用梯度检查点包装关键操作
-        def checkpoint(function, *args):
-            args = [arg.stop_grad() if isinstance(arg, jt.Var) else arg for arg in args]
-            return function(*args)
+        # 1. 点云特征提取
+        shape_latent = self.transformer(vertices)  # [B, feat_dim]
+        vertices_local = vertices.permute(0, 2, 1)  # [B, N, 3]
         
-        # 1. 修改提取顶点特征的部分(添加残差连接)
-        vertex_features = []
-        x = vertices.permute(0, 2, 1)  # [B,N,3]
-        residual = x
+        # 2. 扩展全局特征并连接局部特征
+        shape_feat_expanded = shape_latent.unsqueeze(1).expand(-1, N, -1)  # [B, N, feat_dim*2]
+        vertex_input = jt.concat([vertices_local, shape_feat_expanded], dim=-1)  # [B, N, 3+feat_dim*2]
         
-        for i, layer in enumerate(self.joint_features):
-            if i > 0:
-                x = x + residual  # 添加残差连接
-            x = checkpoint(layer, x)  # 使用检查点
-            x.requires_grad = True
-            vertex_features.append(x)
-            residual = x
+        # 3. 点云局部特征提取
+        point_features = self.point_feature_net(vertex_input)  # [B, N, feat_dim]
         
-        # 2. 提取全局特征(确保梯度)
-        shape_latent = checkpoint(self.transformer, vertices)
-        shape_latent.requires_grad = True
+        # 4. 跨模态特征融合
+        attn_output1, _ = self.cross_attention[0](
+            point_features,  # query: [B, N, feat_dim]
+            point_features,  # key: [B, N, feat_dim]
+            point_features  # value: [B, N, feat_dim]
+        )
         
-        # 3. 骨骼预测分支(添加梯度监控)
+        # 5. 全局特征聚合
+        global_point_feat = jt.mean(attn_output1, dim=1)  # [B, feat_dim]
+        
+        # 6. 多尺度特征金字塔
         pyramid_features = []
         x = shape_latent
         for layer in self.joint_pyramid:
-            def hook_fn(grad):
-                if grad is None:
-                    print(f"Gradient is None for layer {layer}")
-                return grad
-            
             x = layer(x)
-            x.register_hook(hook_fn)
-            x.requires_grad = True
             pyramid_features.append(x)
+
+        # 投影到统一维度
+        multi_scale_features = jt.concat(pyramid_features, dim=1)
+        multi_scale_features = self.pyramid_proj(multi_scale_features)  # [B, feat_dim]
         
-        # 4. 特征融合
-        multi_scale_features = concat(pyramid_features, dim=1)
-        multi_scale_features.requires_grad = True
-        
-        # 5. 预测关节
-        joint_pred = self.joint_predictor(multi_scale_features)
-        joint_pred = joint_pred.view(-1, self.num_joints, 3)
-        joint_pred.requires_grad = True
-        
-        # 6. 约束处理
-        constraint_input = jt.concat([
-            shape_latent,
-            joint_pred.reshape(B, -1)
-        ], dim=1)
-        constraint_input.requires_grad = True
-        
-        # 7. 特征变换与蒙皮预测
-        vertices_feat = vertices.permute(0, 2, 1).reshape(B * N, 3)  # [B*N, 3]
-        shape_feat = shape_latent.unsqueeze(1).expand(-1, N, -1)  # [B, N, feat_dim]
-        shape_feat = shape_feat.reshape(B * N, -1)  # [B*N, feat_dim]
-        
-        # 确保特征有梯度
-        vertices_feat.requires_grad = True
-        shape_feat.requires_grad = True
-        
-        # 特征融合
-        fusion_feat = jt.concat([vertices_feat, shape_feat], dim=1)
-        fusion_feat.requires_grad = True
-        
-        # 特征变换
-        transformed_feat = self.vertex_feature_transform(fusion_feat)
-        transformed_feat = transformed_feat.reshape(B, N, -1).permute(0, 2, 1)
-        transformed_feat.requires_grad = True
-        
-        # 预测蒙皮权重
-        skin_weights = self.skin_predictor(transformed_feat)
-        skin_weights = skin_weights.permute(0, 2, 1)  # [B, N, num_joints]
-        
-        # 应用softmax
-        skin_weights = jt.nn.softmax(skin_weights, dim=-1)
-        skin_weights.requires_grad = True
-        
-        # 计算约束
-        constraint_feat = self.constraint_net.constraint_encoder(constraint_input)
-        symmetry_adjust = self.constraint_net.symmetry_predictor(constraint_feat)
-        planarity_adjust = self.constraint_net.planarity_predictor(constraint_feat)
-        
-        # 应用约束
-        symmetry_adjust = symmetry_adjust.view(B, self.num_joints, 3)
-        planarity_adjust = planarity_adjust.view(B, self.num_joints, 3)
-        
-        joint_adjust = (
-            self.constraint_weights['symmetry'] * symmetry_adjust +
-            self.constraint_weights['planarity'] * planarity_adjust
+        # 7. 第二次注意力融合
+        attn_output2, _ = self.cross_attention[1](
+            multi_scale_features.unsqueeze(1),  # [B, 1, feat_dim*7/4]
+            global_point_feat.unsqueeze(1),     # [B, 1, feat_dim]
+            global_point_feat.unsqueeze(1)      # [B, 1, feat_dim]
         )
         
-        # 最终调整
-        joint_pred = joint_pred + 0.1 * joint_adjust
+        # 8. 生成条件特征
+        condition_features = self.condition_generator(shape_latent)  # [B, feat_dim]
+        
+        # 9. 特征整合
+        fused_features = jt.concat([
+            multi_scale_features,
+            attn_output2.squeeze(1),
+            global_point_feat,
+            condition_features
+        ], dim=1)
+        
+        # 10. 预测关节位置和蒙皮权重
+        joint_pred = self.joint_predictor(fused_features)  # [B, num_joints, 3]
+        
+        # 11. 优化约束
+        constraint_feat = self.constraint_encoder(joint_pred.reshape(B, -1))  # [B, feat_dim]
+        constraint_feat = constraint_feat.unsqueeze(1).expand(-1, N, -1)  # [B, N, feat_dim]
+        
+        # 12. 蒙皮权重预测
+        skin_input = jt.concat([point_features, constraint_feat], dim=-1)  # [B, N, feat_dim*2]
+        skin_features = skin_input.permute(0, 2, 1)  # [B, feat_dim*2, N]
+        skin_weights = self.skin_predictor(skin_features)  # [B, num_joints, N]
+        skin_weights = skin_weights.permute(0, 2, 1)  # [B, N, num_joints]
+        skin_weights = nn.softmax(skin_weights, dim=-1)  # 确保权重和为1
+        
+        # 同步返回值
+        joint_pred.sync()
+        skin_weights.sync()
         
         return joint_pred, skin_weights
     
@@ -222,27 +200,41 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear1 = nn.Linear(in_dim, out_dim)
-        self.ln1 = nn.LayerNorm(out_dim)  # 使用LayerNorm
+        self.ln1 = nn.LayerNorm(out_dim)
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(out_dim, out_dim)
-        self.ln2 = nn.LayerNorm(out_dim)  # 使用LayerNorm
+        self.ln2 = nn.LayerNorm(out_dim)
         
-        self.shortcut = (nn.Sequential(
+        # 确保shortcut维度正确
+        self.shortcut = nn.Sequential(
             nn.Linear(in_dim, out_dim),
             nn.LayerNorm(out_dim)
-        ) if in_dim != out_dim else nn.Identity())
+        ) if in_dim != out_dim else nn.Identity()
         
     def execute(self, x):
-        identity = self.shortcut(x)
+        # 保存原始维度
+        orig_shape = x.shape
+        if len(orig_shape) == 3:
+            B, N, C = orig_shape
+            x = x.reshape(B*N, C)
         
+        # 主路径
+        identity = self.shortcut(x)
         out = self.linear1(x)
         out = self.ln1(out)
         out = self.relu(out)
         out = self.linear2(out)
         out = self.ln2(out)
         
+        # 残差连接
         out = out + identity
-        return self.relu(out)
+        out = self.relu(out)
+        
+        # 恢复原始维度
+        if len(orig_shape) == 3:
+            out = out.reshape(B, N, -1)
+            
+        return out
 
 # 修改 LightweightSE 模块以修复维度问题
 class LightweightSE(nn.Module):
@@ -256,23 +248,22 @@ class LightweightSE(nn.Module):
         )
         
     def execute(self, x):
-        # 处理输入维度 (B*N, C) 或 (B, C)
+        # 输入维度处理
         orig_shape = x.shape
         if len(orig_shape) == 3:
-            # 如果是3D输入，将其压缩为2D
             B, N, C = orig_shape
-            x = x.reshape(-1, C)
+            x = x.reshape(B*N, C)  # 展平为 [B*N, C]
         
-        # 计算通道注意力
-        y = jt.mean(x, dim=0)  # (C,)
-        y = self.fc(y)  # (C,)
+        # 计算通道注意力 - 修正为按特征维度平均
+        y = jt.mean(x, dim=0, keepdims=True)  # [1, C] 保持维度
+        y = self.fc(y)  # [1, C]
         
-        # 广播乘法
-        out = x * y
+        # 应用注意力权重
+        out = x * y  # 广播乘法 [B*N, C] * [1, C]
         
         # 恢复原始维度
         if len(orig_shape) == 3:
-            out = out.reshape(orig_shape)
+            out = out.reshape(B, N, C)
         return out
 
 # 修改 LightweightSEConv 模块以修复维度问题
@@ -302,7 +293,7 @@ class ResidualConvBlock(nn.Module):
         self.conv2 = nn.Conv1d(out_channels, out_channels, 1)
         self.bn2 = nn.BatchNorm1d(out_channels)
         
-        # 修改shortcut确保梯度传递
+        # 确保shortcut维度匹配
         if in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv1d(in_channels, out_channels, 1),
@@ -312,62 +303,192 @@ class ResidualConvBlock(nn.Module):
             self.shortcut = nn.Identity()
             
     def execute(self, x):
+        # 保存输入维度
         identity = self.shortcut(x)
+        
+        # 主路径
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
+        
+        # 残差连接
         out = out + identity
-        return self.relu(out)
+        out = self.relu(out)
+        
+        # 确保梯度传播
+        out.sync()
+        return out
 
 class HierarchicalJointPredictor(nn.Module):
     def __init__(self, in_channels, num_joints):
         super().__init__()
         self.num_joints = num_joints
         
-        # 共享特征提取
+        # 1. 增强共享特征提取和骨骼链编码
         self.shared_mlp = nn.Sequential(
-            nn.Linear(in_channels, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(in_channels, 1024),
+            nn.LayerNorm(1024),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+        )
+
+        # 2. 骨骼链特征编码器 - 使用ModuleList替代ModuleDict
+        self.chain_names = ['spine', 'l_arm', 'r_arm', 'l_leg', 'r_leg']
+        self.chain_encoders = nn.ModuleList([
+            self._make_chain_encoder(512, 256) for _ in range(len(self.chain_names))
+        ])
+        # 创建名称到索引的映射
+        self.chain_name_to_idx = {name: idx for idx, name in enumerate(self.chain_names)}
+        
+        # 3. 全局骨架特征提取器
+        self.global_features = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
         )
         
-        # 分层预测各个关节
+        # 4. 父节点注意力模块
+        self.parent_attention = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(3, 64),
+                nn.ReLU(),
+                nn.Linear(64, 128)
+            ) for _ in range(num_joints)
+        ])
+        
+        # 5. 改进的关节预测器
         self.joint_predictors = nn.ModuleList()
         for i in range(num_joints):
-            # 每个关节预测器获取父节点信息
-            input_dim = 512 + (3 if parents[i] is not None else 0)
-            self.joint_predictors.append(
-                nn.Sequential(
-                    nn.Linear(input_dim, 256),
-                    nn.ReLU(),
-                    nn.Linear(256, 3)
-                )
-            )
-    
+            input_dim = 512 + 128 + 256  # 局部特征 + 全局特征 + 链特征
+            if parents[i] is not None:
+                input_dim += 128  # 父节点注意力特征
+            
+            self.joint_predictors.append(nn.Sequential(
+                nn.Linear(input_dim, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Linear(128, 3)
+            ))
+        
+        # 6. 位置细化网络
+        self.refinement = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(128 + 3 + 256, 128),  # 全局特征 + 相对位置 + 链特征
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(),
+                nn.Linear(64, 3)
+            ) for _ in range(num_joints)
+        ])
+
+    def _make_chain_encoder(self, in_dim, out_dim):
+        return nn.Sequential(
+            nn.Linear(in_dim, in_dim // 2),
+            nn.LayerNorm(in_dim // 2),
+            nn.ReLU(),
+            nn.Linear(in_dim // 2, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.ReLU()
+        )
+
+    def _get_chain_for_joint(self, joint_idx):
+        # 根据关节索引返回所属的骨骼链
+        spine_joints = [0, 1, 2, 3, 4, 5]
+        l_arm_joints = [6, 7, 8, 9]
+        r_arm_joints = [10, 11, 12, 13]
+        l_leg_joints = [14, 15, 16, 17]
+        r_leg_joints = [18, 19, 20, 21]
+        
+        if joint_idx in spine_joints:
+            return 'spine'
+        elif joint_idx in l_arm_joints:
+            return 'l_arm'
+        elif joint_idx in r_arm_joints:
+            return 'r_arm'
+        elif joint_idx in l_leg_joints:
+            return 'l_leg'
+        elif joint_idx in r_leg_joints:
+            return 'r_leg'
+        return None
+
     def execute(self, x):
         batch_size = x.shape[0]
-        shared_features = self.shared_mlp(x)
         
-        # 按照骨骼层次结构预测关节
+        # 1. 提取共享特征
+        shared_features = self.shared_mlp(x)  # [B, 512]
+        
+        # 2. 提取全局特征
+        global_feat = self.global_features(shared_features)  # [B, 128]
+        
+        # 3. 生成骨骼链特征 - 使用ModuleList
+        chain_features = {}
+        for name in self.chain_names:
+            idx = self.chain_name_to_idx[name]
+            chain_features[name] = self.chain_encoders[idx](shared_features)
+        
+        # 4. 层次化预测
         joint_positions = []
         for i in range(self.num_joints):
-            if parents[i] is None:
-                # 根节点直接预测
-                joint_pos = self.joint_predictors[i](shared_features)
-            else:
-                # 非根节点基于父节点位置预测
-                parent_pos = joint_positions[parents[i]]
-                features = jt.concat([shared_features, parent_pos], dim=1)
-                joint_pos = self.joint_predictors[i](features)
-                # 相对位置预测
-                joint_pos = parent_pos + joint_pos
-                
-            joint_positions.append(joint_pos)
+            # 获取当前关节所属的骨骼链特征
+            chain_name = self._get_chain_for_joint(i)
+            chain_feat = chain_features[chain_name]
             
-        return jt.stack(joint_positions, dim=1)  # [B, num_joints, 3]
+            if parents[i] is None:
+                # 根节点预测
+                features = jt.concat([
+                    shared_features,
+                    global_feat,
+                    chain_feat
+                ], dim=1)
+                joint_pos = self.joint_predictors[i](features)
+            else:
+                # 非根节点预测
+                parent_pos = joint_positions[parents[i]]
+                
+                # 计算父节点注意力特征
+                parent_attn = self.parent_attention[i](parent_pos)
+                
+                # 特征融合
+                features = jt.concat([
+                    shared_features,
+                    global_feat,
+                    chain_feat,
+                    parent_attn
+                ], dim=1)
+                
+                # 预测相对位置
+                relative_pos = self.joint_predictors[i](features)
+                
+                # 应用细化网络
+                refine_input = jt.concat([
+                    global_feat,
+                    relative_pos,
+                    chain_feat
+                ], dim=1)
+                refined_offset = self.refinement[i](refine_input)
+                
+                # 最终位置 = 父节点位置 + 细化后的偏移
+                joint_pos = parent_pos + refined_offset
+            
+            joint_positions.append(joint_pos)
+        
+        joints = jt.stack(joint_positions, dim=1)  # [B, num_joints, 3]
+        
+        # 确保梯度传播
+        joints.sync()
+        return joints
 
 # 新增约束网络
 class ConstraintNetwork(nn.Module):
