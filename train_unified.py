@@ -382,7 +382,7 @@ def main():
                         help='Path to pretrained model')
     
     # 训练参数
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=500,
                         help='Number of training epochs')
