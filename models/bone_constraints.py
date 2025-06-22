@@ -36,8 +36,8 @@ class BoneConstraints:
 
         # 更新关节角度范围，移除负值范围
         self.joint_angle_ranges = {
-            # 脊柱链保持近乎直立
-            1: (0.0, 0.15),    # spine
+            0: (0.0, 0.15),    # hip的角度范围(与地面法线的夹角)
+            1: (3.0, 3.14),    # spine
             2: (0.0, 0.15),    # chest 
             3: (0.0, 0.15),     # upper_chest
             4: (0.0, 0.2),     # neck
@@ -58,12 +58,12 @@ class BoneConstraints:
             13: (0.0, 0.15),   # r_hand
             
             # 髋部 - 限制在合适的角度范围
-            14: (1.6, 2.0),    # l_upper_leg
-            18: (1.6, 2.0),    # r_upper_leg
+            14: (1.0, 1.5),    # l_upper_leg
+            18: (1.0, 1.5),    # r_upper_leg
             
             # 腿部 - 保持近似平行
-            15: (0.0, 0.2),    # l_lower_leg
-            19: (0.0, 0.2),    # r_lower_leg
+            15: (1.0, 1.5),    # l_lower_leg
+            19: (1.0, 1.5),    # r_lower_leg
             
             # 脚部 - 允许适度弯曲
             16: (0.0, 0.3),    # l_foot
@@ -141,20 +141,31 @@ class BoneConstraints:
         return bone_lengths
 
     def compute_joint_angles(self, joints):
-        """计算所有关节角度"""
+        """计算所有关节角度，为hip添加特殊处理"""
         B = joints.shape[0]
         joint_angles = {}
         
+        # 特殊处理hip关节(关节0)
+        # 计算hip与地面法线(向上)的夹角
+        up_vector = jt.array([0.0, 1.0, 0.0]).expand(B, 3)
+        hip_dir = joints[:, 1] - joints[:, 0]  # spine - hip 方向
+        hip_dir = hip_dir / (jt.norm(hip_dir, dim=-1, keepdim=True) + 1e-6)
+        
+        # 计算与地面法线的夹角
+        cos_angle = jt.sum(hip_dir * up_vector, dim=-1)
+        cos_angle = jt.clamp(cos_angle, -0.999999, 0.999999)
+        hip_angle = jt.arccos(cos_angle)
+        joint_angles[0] = hip_angle
+        
+        # 处理其他关节
         for joint_id, parent_id in enumerate(parents):
             if parent_id is not None:
-                # 获取当前骨骼的方向向量
                 current_vec = joints[:, joint_id] - joints[:, parent_id]
                 current_vec = current_vec / (jt.norm(current_vec, dim=-1, keepdim=True) + 1e-6)
                 
                 # 获取父节点的父节点
                 grand_parent_id = parents[parent_id]
                 if grand_parent_id is not None:
-                    # 计算父骨骼的方向向量
                     parent_vec = joints[:, parent_id] - joints[:, grand_parent_id]
                     parent_vec = parent_vec / (jt.norm(parent_vec, dim=-1, keepdim=True) + 1e-6)
                     
@@ -162,14 +173,28 @@ class BoneConstraints:
                     cos_angle = jt.sum(current_vec * parent_vec, dim=-1)
                     cos_angle = jt.clamp(cos_angle, -0.999999, 0.999999)
                     angle = jt.arccos(cos_angle)
-                    joint_angles[joint_id] = angle  # [B]
-                
+                    joint_angles[joint_id] = angle
+                elif parent_id == 0:  # 直接连接到hip的关节
+                    # 使用与hip方向的夹角
+                    cos_angle = jt.sum(current_vec * hip_dir, dim=-1)
+                    cos_angle = jt.clamp(cos_angle, -0.999999, 0.999999)
+                    angle = jt.arccos(cos_angle)
+                    joint_angles[joint_id] = angle
+        
         return joint_angles
 
     def compute_chain_consistency(self, joints):
-        """计算骨骼链的一致性约束"""
+        """修改骨骼链一致性计算，加入hip特殊处理"""
         chain_loss = jt.array(0.0)
         
+        # 首先检查hip的方向
+        up_vector = jt.array([0.0, 1.0, 0.0]).expand(joints.shape[0], 3)
+        hip_dir = joints[:, 1] - joints[:, 0]  # spine - hip
+        hip_dir = hip_dir / (jt.norm(hip_dir, dim=-1, keepdim=True) + 1e-6)
+        hip_up_align = jt.sum(hip_dir * up_vector, dim=-1)
+        chain_loss = chain_loss + 2.0 * jt.mean((hip_up_align - 0.95) ** 2)  # 期望接近垂直
+        
+        # 处理其他骨骼链
         for chain_name, bones in self.bone_chains.items():
             chain_dir = None
             prev_dir = None
@@ -179,11 +204,8 @@ class BoneConstraints:
                 curr_dir = curr_dir / (jt.norm(curr_dir, dim=-1, keepdim=True) + 1e-6)
                 
                 if prev_dir is not None:
-                    # 计算相邻骨骼方向的一致性
                     cos_sim = jt.sum(prev_dir * curr_dir, dim=-1)
-                    # 确定目标余弦值
                     target = 0.7 if 'arm' in chain_name or 'leg' in chain_name else 0.9
-                    # 使用完整的chain_name作为键
                     chain_loss = chain_loss + self.chain_weights[chain_name] * jt.mean((cos_sim - target) ** 2)
                 
                 prev_dir = curr_dir

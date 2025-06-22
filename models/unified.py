@@ -48,12 +48,12 @@ class UnifiedModel(nn.Module):
             nn.Linear(512, feat_dim)
         )
         
-        # 多尺度骨骼特征提取
+        # 修改多尺度骨骼特征提取
         self.joint_features = nn.ModuleList([
-            self._make_res_block(3, 64, feat_dim//4),
-            self._make_res_block(3, 128, feat_dim//4),
-            self._make_res_block(3, 256, feat_dim//4),
-            self._make_res_block(3, 512, feat_dim//4)
+            self._make_res_block(3, 64),
+            self._make_res_block(64, 128),
+            self._make_res_block(128, 256),
+            self._make_res_block(256, feat_dim//4)
         ])
         
         # 层次化交叉注意力
@@ -63,83 +63,158 @@ class UnifiedModel(nn.Module):
             MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
         ])
         
-        # 简化的蒙皮预测分支
-        self.skin_predictor = nn.Sequential(
-            nn.Linear(feat_dim * 2, feat_dim),
-            nn.BatchNorm1d(feat_dim),
+        # 添加维度转换辅助层
+        self.vertex_feature_transform = nn.Sequential(
+            nn.Linear(3 + feat_dim, feat_dim * 4),
+            nn.BatchNorm1d(feat_dim * 4),
             nn.ReLU(),
-            nn.Linear(feat_dim, num_joints),
-            nn.Softmax(dim=1)  # 确保权重和为1
+            nn.Linear(feat_dim * 4, feat_dim * 4)  # 添加额外线性层
         )
         
-        # 保留其他必要组件
-        self.fusion_weights = nn.Parameter(jt.ones(4))
+        # 修改蒙皮预测分支的输入维度处理
+        self.skin_predictor = nn.Sequential(
+            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),
+            nn.BatchNorm1d(feat_dim * 2),
+            nn.ReLU(),
+            ResidualConvBlock(feat_dim * 2, feat_dim * 2),
+            ResidualConvBlock(feat_dim * 2, feat_dim),
+            nn.Conv1d(feat_dim, num_joints, 1)
+        )
+        
+        # 修改fusion_weights初始化方式
+        self.fusion_weights = jt.array([1.0, 1.0, 1.0, 1.0]).float()
+        self.fusion_weights.requires_grad = True
+        
         self.constraint_net = ConstraintNetwork(feat_dim, num_joints)
         self.constraint_weights = {
             'symmetry': 1.0,
             'planarity': 0.8
         }
-    
-    def _make_res_block(self, in_dim, hidden_dim, out_dim):
+        
+        # 修改参数初始化方式
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                m.weight = jt.init.xavier_gauss_(m.weight)
+                if m.bias is not None:
+                    m.bias.zero_()
+                m.weight.requires_grad = True
+                if m.bias is not None:
+                    m.bias.requires_grad = True
+        
+        # 应用初始化
+        self.apply(init_weights)
+        
+        # 确保所有参数可训练
+        for p in self.parameters():
+            p.requires_grad = True
+
+    def _make_res_block(self, in_dim, out_dim):
         return nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.ReLU(),
-            ResidualBlock(hidden_dim, hidden_dim),
-            nn.Linear(hidden_dim, out_dim)
+            ResidualBlock(in_dim, out_dim),
+            nn.LayerNorm(out_dim),  # 添加LayerNorm
+            nn.Linear(out_dim, out_dim)
         )
 
     def execute(self, vertices):
-        # 共享特征提取 (B, 3, N) -> (B, feat_dim)
-        shape_latent = self.transformer(vertices)
+        # 确保输入张量格式正确且有梯度
+        vertices = vertices.float()
+        vertices.requires_grad = True
+        B, _, N = vertices.shape
         
-        # 骨骼预测 - 使用特征金字塔
+        # 使用梯度检查点包装关键操作
+        def checkpoint(function, *args):
+            args = [arg.stop_grad() if isinstance(arg, jt.Var) else arg for arg in args]
+            return function(*args)
+        
+        # 1. 修改提取顶点特征的部分(添加残差连接)
+        vertex_features = []
+        x = vertices.permute(0, 2, 1)  # [B,N,3]
+        residual = x
+        
+        for i, layer in enumerate(self.joint_features):
+            if i > 0:
+                x = x + residual  # 添加残差连接
+            x = checkpoint(layer, x)  # 使用检查点
+            x.requires_grad = True
+            vertex_features.append(x)
+            residual = x
+        
+        # 2. 提取全局特征(确保梯度)
+        shape_latent = checkpoint(self.transformer, vertices)
+        shape_latent.requires_grad = True
+        
+        # 3. 骨骼预测分支(添加梯度监控)
         pyramid_features = []
         x = shape_latent
         for layer in self.joint_pyramid:
+            def hook_fn(grad):
+                if grad is None:
+                    print(f"Gradient is None for layer {layer}")
+                return grad
+            
             x = layer(x)
+            x.register_hook(hook_fn)
+            x.requires_grad = True
             pyramid_features.append(x)
         
-        # 连接多尺度特征
+        # 4. 特征融合
         multi_scale_features = concat(pyramid_features, dim=1)
+        multi_scale_features.requires_grad = True
+        
+        # 5. 预测关节
         joint_pred = self.joint_predictor(multi_scale_features)
         joint_pred = joint_pred.view(-1, self.num_joints, 3)
+        joint_pred.requires_grad = True
         
-        # 约束网络处理 - 移除距离相关约束
-        B, _, N = vertices.shape
+        # 6. 约束处理
         constraint_input = jt.concat([
             shape_latent,
             joint_pred.reshape(B, -1)
         ], dim=1)
+        constraint_input.requires_grad = True
         
+        # 7. 特征变换与蒙皮预测
+        vertices_feat = vertices.permute(0, 2, 1).reshape(B * N, 3)  # [B*N, 3]
+        shape_feat = shape_latent.unsqueeze(1).expand(-1, N, -1)  # [B, N, feat_dim]
+        shape_feat = shape_feat.reshape(B * N, -1)  # [B*N, feat_dim]
+        
+        # 确保特征有梯度
+        vertices_feat.requires_grad = True
+        shape_feat.requires_grad = True
+        
+        # 特征融合
+        fusion_feat = jt.concat([vertices_feat, shape_feat], dim=1)
+        fusion_feat.requires_grad = True
+        
+        # 特征变换
+        transformed_feat = self.vertex_feature_transform(fusion_feat)
+        transformed_feat = transformed_feat.reshape(B, N, -1).permute(0, 2, 1)
+        transformed_feat.requires_grad = True
+        
+        # 预测蒙皮权重
+        skin_weights = self.skin_predictor(transformed_feat)
+        skin_weights = skin_weights.permute(0, 2, 1)  # [B, N, num_joints]
+        
+        # 应用softmax
+        skin_weights = jt.nn.softmax(skin_weights, dim=-1)
+        skin_weights.requires_grad = True
+        
+        # 计算约束
         constraint_feat = self.constraint_net.constraint_encoder(constraint_input)
-        
-        # 只保留基本的形状约束
         symmetry_adjust = self.constraint_net.symmetry_predictor(constraint_feat)
         planarity_adjust = self.constraint_net.planarity_predictor(constraint_feat)
         
-        # 将调整reshape为关节形状
+        # 应用约束
         symmetry_adjust = symmetry_adjust.view(B, self.num_joints, 3)
         planarity_adjust = planarity_adjust.view(B, self.num_joints, 3)
         
-        # 简化的约束调整
         joint_adjust = (
             self.constraint_weights['symmetry'] * symmetry_adjust +
             self.constraint_weights['planarity'] * planarity_adjust
         )
         
-        # 软约束：通过残差连接应用调整
+        # 最终调整
         joint_pred = joint_pred + 0.1 * joint_adjust
-        
-        # 简化的蒙皮预测
-        vertices_flat = vertices.permute(0, 2, 1).reshape(B * N, 3)
-        shape_latent_exp = shape_latent.unsqueeze(1).repeat(1, N, 1).reshape(B * N, -1)
-        
-        # 简单连接特征
-        fusion_feat = concat([vertices_flat, shape_latent_exp], dim=1)
-        
-        # 直接预测蒙皮权重
-        skin_weights = self.skin_predictor(fusion_feat)
-        skin_weights = skin_weights.reshape(B, N, -1)  # [B, N, J]
         
         return joint_pred, skin_weights
     
@@ -147,20 +222,26 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear1 = nn.Linear(in_dim, out_dim)
-        self.bn1 = nn.BatchNorm1d(out_dim)
+        self.ln1 = nn.LayerNorm(out_dim)  # 使用LayerNorm
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(out_dim, out_dim)
-        self.bn2 = nn.BatchNorm1d(out_dim)
-        self.shortcut = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+        self.ln2 = nn.LayerNorm(out_dim)  # 使用LayerNorm
+        
+        self.shortcut = (nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim)
+        ) if in_dim != out_dim else nn.Identity())
         
     def execute(self, x):
-        residual = self.shortcut(x)
+        identity = self.shortcut(x)
+        
         out = self.linear1(x)
-        out = self.bn1(out)
+        out = self.ln1(out)
         out = self.relu(out)
         out = self.linear2(out)
-        out = self.bn2(out)
-        out += residual
+        out = self.ln2(out)
+        
+        out = out + identity
         return self.relu(out)
 
 # 修改 LightweightSE 模块以修复维度问题
@@ -220,16 +301,24 @@ class ResidualConvBlock(nn.Module):
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv1d(out_channels, out_channels, 1)
         self.bn2 = nn.BatchNorm1d(out_channels)
-        self.shortcut = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
         
+        # 修改shortcut确保梯度传递
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, 1),
+                nn.BatchNorm1d(out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+            
     def execute(self, x):
-        residual = self.shortcut(x)
+        identity = self.shortcut(x)
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
-        out += residual
+        out = out + identity
         return self.relu(out)
 
 class HierarchicalJointPredictor(nn.Module):
