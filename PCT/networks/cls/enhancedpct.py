@@ -2,12 +2,13 @@ import jittor as jt
 from jittor import nn  
 from jittor import init
 from jittor.contrib import concat
+from jittor.attention import MultiheadAttention
 import numpy as np
 from PCT.misc.ops import FurthestPointSampler
 from PCT.misc.ops import knn_point, index_points
 
 class EnhancedPointTransformer(nn.Module):
-    def __init__(self, output_channels=40, layers=8):
+    def __init__(self, output_channels=40, layers=8, num_joints=22):
         super().__init__()
         self.conv1 = nn.Conv1d(3, 128, kernel_size=1, bias=False)
         self.conv2 = nn.Conv1d(128, 256, kernel_size=1, bias=False)
@@ -19,9 +20,17 @@ class EnhancedPointTransformer(nn.Module):
         for i in range(layers):
             self.sa_layers.append(EnhancedSA_Layer(256))
         
+        # 骨骼结构感知模块
+        self.joint_aware_att = nn.ModuleList([
+            JointAwareAttention(256, num_joints),
+            JointAwareAttention(256, num_joints)
+        ])
+        
+        self.total_layers = layers + 2
+        
         # 多尺度特征融合
         self.conv_fuse = nn.Sequential(
-            nn.Conv1d(256 * layers, 1024, kernel_size=1, bias=False),
+            nn.Conv1d(256 * self.total_layers, 1024, kernel_size=1, bias=False),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(scale=0.2)
         )
@@ -50,8 +59,21 @@ class EnhancedPointTransformer(nn.Module):
             x = sa_layer(x, x_input)
             sa_outputs.append(x)
         
+        # 骨骼结构感知
+        joint_aware_outputs = []  # 修复: 存储每个关节感知模块的输出
+        for att_layer in self.joint_aware_att:
+            x_joint = att_layer(x)  # 修复: 使用当前特征作为输入
+            joint_aware_outputs.append(x_joint)
+        
         # 多尺度特征融合
-        x = concat(sa_outputs, dim=1)
+        # 修复: 合并SA层输出和关节感知输出
+        all_outputs = sa_outputs + joint_aware_outputs
+        x = concat(all_outputs, dim=1)
+        
+        # 修复: 确保通道数匹配
+        assert x.shape[1] == 256 * self.total_layers, \
+            f"通道数不匹配: 期望 {256 * self.total_layers}, 实际 {x.shape[1]}"
+        
         x = self.conv_fuse(x)
         x = jt.max(x, 2).view(batch_size, -1)
         
@@ -108,13 +130,32 @@ class EnhancedSA_Layer(nn.Module):
         # 残差连接
         return residual + x_r
 
-if __name__ == '__main__':
+class JointAwareAttention(nn.Module):
+    def __init__(self, channels, num_joints):
+        super().__init__()
+        # 关节嵌入参数
+        self.joint_embeddings = nn.Parameter(init.gauss((num_joints, channels), 'float32'))
+        self.attn = MultiheadAttention(channels, num_heads=4, batch_first=True)
     
+    def execute(self, x):
+        """
+        x: [B, C, N] 点云特征
+        """
+        B, C, N = x.shape
+        x = x.permute(0, 2, 1)  # [B, N, C]
+        
+        # 关节嵌入 [1, J, C] -> [B, J, C]
+        joint_emb = self.joint_embeddings.unsqueeze(0).repeat(B, 1, 1)
+        
+        # 点与关节的交叉注意力
+        attn_output, _ = self.attn(x, joint_emb, joint_emb)
+        
+        # 残差连接
+        return (x + attn_output).permute(0, 2, 1)  # 恢复为 [B, C, N]
+
+if __name__ == '__main__':
     jt.flags.use_cuda=1
-    input_points = init.gauss((16, 3, 1024), dtype='float32')  # B, D, N 
-
-
-    network = EnhancedPointTransformer()
+    input_points = init.gauss((16, 3, 1024), dtype='float32')
+    network = EnhancedPointTransformer(layers=8, num_joints=22)
     out_logits = network(input_points)
-    print (out_logits.shape)
-
+    print(out_logits.shape)

@@ -7,7 +7,7 @@ from dataset.asset import Asset
 from dataset.dataset import get_dataloader, transform
 from dataset.sampler import SamplerMix
 from models.skin import create_model
-
+import jittor.nn as nn
 import numpy as np
 from scipy.spatial import cKDTree
 import random
@@ -56,6 +56,7 @@ def predict(args):
         
         B = vertices.shape[0]
         outputs = model(vertices, joints)
+
         for i in range(B):
             # resample
             skin = outputs[i].numpy()
@@ -76,6 +77,7 @@ def predict(args):
             os.makedirs(path, exist_ok=True)
             np.save(os.path.join(path, "predict_skin"), skin_resampled)
             np.save(os.path.join(path, "transformed_vertices"), o_vertices)
+    # Calculate average L1 loss
     print("finished")
 
 def main():

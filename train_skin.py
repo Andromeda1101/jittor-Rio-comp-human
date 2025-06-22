@@ -10,15 +10,18 @@ from jittor import nn
 from jittor import optim
 
 from dataset.dataset import get_dataloader, transform
-from dataset.format import id_to_name
+from dataset.format import id_to_name, symmetry_map, symmetric_joints
 from dataset.sampler import SamplerMix
 from models.skin import create_model
+from models.metrics import skin_symmetry_constraint
 
 from dataset.exporter import Exporter
 
 # Set Jittor flags
 jt.flags.use_cuda = 1
-
+def smooth_labels(labels, smoothing=0.1):
+    n_classes = labels.shape[-1]
+    return labels * (1 - smoothing) + smoothing / n_classes
 def train(args):
     """
     Main training function
@@ -66,7 +69,6 @@ def train(args):
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
-    
     # Create loss function
     criterion_mse = nn.MSELoss()
     criterion_l1 = nn.L1Loss()
@@ -98,28 +100,46 @@ def train(args):
     # Training loop
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
+    def cosine_annealing_lr(initial_lr, epoch, total_epochs):
+        return initial_lr * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
     for epoch in range(args.epochs):
+        new_lr = cosine_annealing_lr(args.learning_rate, epoch, args.epochs)
+        optimizer.lr = new_lr
+        # Dynamic constraint weight
+        current_symm_weight = 0.1 * min(1.0, (epoch + 1) / 10)
+
         # Training phase
         model.train()
         train_loss_mse = 0.0
         train_loss_l1 = 0.0
+        symm_loss_total = 0.0
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
             # Get data and labels
             vertices, joints, skin = data['vertices'], data['joints'], data['skin']
-
+            
+            symm_map = data.get('symmetry_map', symmetry_map)
+            skin_smoothed = smooth_labels(skin, smoothing=0.1)
             vertices: jt.Var
             joints: jt.Var
             skin: jt.Var
             outputs = model(vertices, joints)
-            loss_mse = criterion_mse(outputs, skin)
-            loss_l1 = criterion_l1(outputs, skin)
-            loss = loss_mse + loss_l1
+            loss_mse = criterion_mse(outputs, skin_smoothed)
+            loss_l1 = criterion_l1(outputs, skin_smoothed)
+            base_loss = loss_mse + loss_l1
+
+            # Apply skin symmetry constraint
+            symm_loss = skin_symmetry_constraint(
+                outputs, symm_map, symmetric_joints
+            ) * current_symm_weight
+            symm_loss_total += symm_loss.item()
+            
+            total_loss = base_loss + symm_loss
             
             # Backward pass and optimize
             optimizer.zero_grad()
-            optimizer.backward(loss)
+            optimizer.backward(total_loss)
             optimizer.step()
             
             # Calculate statistics
@@ -129,16 +149,18 @@ def train(args):
             # Print progress
             if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                           f"Loss mse: {loss_mse.item():.4f} Loss l1: {loss_l1.item():.4f}")
+                           f"Loss mse: {loss_mse.item():.4f} Loss l1: {loss_l1.item():.4f} Symm Loss: {symm_loss.item():.4f} ")
         
         # Calculate epoch statistics
         train_loss_mse /= len(train_loader)
         train_loss_l1 /= len(train_loader)
+        symm_loss_total /= len(train_loader)
         epoch_time = time.time() - start_time
         
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
                    f"Train Loss mse: {train_loss_mse:.4f} "
                    f"Train Loss l1: {train_loss_l1:.4f} "
+                   f"Symm Loss: {symm_loss_total:.4f} "
                    f"Time: {epoch_time:.2f}s "
                    f"LR: {optimizer.lr:.6f}")
         
@@ -233,8 +255,8 @@ def main():
                         help='Root directory for the data files')
     
     # Model parameters
-    parser.add_argument('--model_name', type=str, default='pct',
-                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced', 'unified'],
+    parser.add_argument('--model_name', type=str, default='enhanced',
+                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced'],
                         help='Model architecture to use')
     parser.add_argument('--model_type', type=str, default='standard',
                         choices=['standard', 'enhanced'],
@@ -247,7 +269,7 @@ def main():
                         help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=1000,
                         help='Number of training epochs')
-    parser.add_argument('--optimizer', type=str, default='adam',
+    parser.add_argument('--optimizer', type=str, default='sgd',
                         choices=['sgd', 'adam'],
                         help='Optimizer to use')
     parser.add_argument('--learning_rate', type=float, default=0.0001,

@@ -4,7 +4,7 @@ import os
 import argparse
 import time
 import random
-import wandb
+# import wandb
 
 from jittor import nn
 from jittor import optim
@@ -12,10 +12,11 @@ from jittor import optim
 from dataset.dataset import get_dataloader, transform
 from dataset.sampler import SamplerMix
 from dataset.exporter import Exporter
+from dataset.format import symmetric_bones, angle_constraints
 from models.skeleton import create_model
 
-from models.metrics import J2J
-
+from models.metrics import J2J, symmetric_bone_length_constraint, adaptive_joint_angle_constraint
+from collections import deque
 # Set Jittor flags
 jt.flags.use_cuda = 1
 
@@ -100,10 +101,17 @@ def train(args):
     # Training loop
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
+    smooth_J2J_window = deque(maxlen=5)  # 滑动窗口大小
+
     for epoch in range(args.epochs):
+        current_symm_weight = 0.2 * min(1.0, (epoch + 1) / 10)
+        current_angle_weight = 0.1 * min(1.0, (epoch + 1) / 10)
+
         # Training phase
         model.train()
         train_loss = 0.0
+        symm_loss_total = 0.0
+        angle_loss_total = 0.0
         
         start_time = time.time()
         for batch_idx, data in enumerate(train_loader):
@@ -116,9 +124,24 @@ def train(args):
             joints = joints.reshape(outputs.shape[0], -1)
             loss = criterion(outputs, joints)
             
+            # Apply bone constraints
+            pred_joints_3d = outputs.reshape(outputs.shape[0], -1, 3)
+            
+            # Symmetric bone length constraint
+            symm_loss = symmetric_bone_length_constraint(
+                pred_joints_3d, symmetric_bones) * current_symm_weight
+            symm_loss_total += symm_loss.item()
+            
+            # Adaptive joint angle constraint
+            angle_loss = adaptive_joint_angle_constraint(
+                pred_joints_3d, angle_constraints) * current_angle_weight
+            angle_loss_total += angle_loss.item()
+            
+            total_loss = loss + symm_loss + angle_loss
+
             # Backward pass and optimize
             optimizer.zero_grad()
-            optimizer.backward(loss)
+            optimizer.backward(total_loss)
             optimizer.step()
             
             # Calculate statistics
@@ -127,14 +150,20 @@ def train(args):
             # Print progress
             if (batch_idx + 1) % args.print_freq == 0 or (batch_idx + 1) == len(train_loader):
                 log_message(f"Epoch [{epoch+1}/{args.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] "
-                           f"Loss: {loss.item():.4f}")
+                           f"Loss: {loss.item():.4f} "
+                           f"Symm Loss: {symm_loss.item():.4f} "
+                           f"Angle Loss: {angle_loss.item():.4f} ")
         
         # Calculate epoch statistics
         train_loss /= len(train_loader)
+        symm_loss_total /= len(train_loader)
+        angle_loss_total /= len(train_loader)
         epoch_time = time.time() - start_time
         
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
                    f"Train Loss: {train_loss:.4f} "
+                   f"Symm Loss: {symm_loss_total:.4f} "
+                   f"Angle Loss: {angle_loss_total:.4f} "
                    f"Time: {epoch_time:.2f}s "
                    f"LR: {optimizer.lr:.6f}")
         
@@ -182,8 +211,11 @@ def train(args):
             val_loss /= len(val_loader)
             J2J_loss /= len(val_loader)
             
-            log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f}")
-            
+            # 计算滑动平均
+            smooth_J2J_window.append(J2J_loss)
+            avg_J2J = sum(smooth_J2J_window) / len(smooth_J2J_window)
+
+            log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f} Smoothed: {avg_J2J:.4f}")
             # Log validation metrics
             # wandb.log({
             #     "val_loss": val_loss,
@@ -191,17 +223,16 @@ def train(args):
             #     "epoch": epoch + 1
             # })
             
-            # Save best model
-            if J2J_loss < best_loss:
-                best_loss = J2J_loss
+            if avg_J2J < best_loss:
+                best_loss = avg_J2J
                 model_path = os.path.join(args.output_dir, 'best_model.pkl')
                 model.save(model_path)
-                log_message(f"Saved best model with loss {best_loss:.4f} to {model_path}")
-                no_improve_epochs = 0  # Reset counter
+                log_message(f"Saved best model with smoothed loss {best_loss:.4f} to {model_path}")
+                no_improve_epochs = 0
             else:
                 no_improve_epochs += 1
                 if no_improve_epochs >= args.patience:
-                    log_message(f"Early stopping triggered after {epoch+1} epochs")
+                    log_message(f"Early stopping triggered after {epoch+1} epochs with smoothed loss {avg_J2J:.4f}")
                     break
         
         # Save checkpoint
@@ -233,8 +264,8 @@ def main():
                         help='Root directory for the data files')
     
     # Model parameters
-    parser.add_argument('--model_name', type=str, default='pct',
-                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced', 'unified'],
+    parser.add_argument('--model_name', type=str, default='pct2',
+                        choices=['pct', 'pct2', 'custom_pct', 'skeleton', 'jspct', 'enhanced'],
                         help='Model architecture to use')
     parser.add_argument('--model_type', type=str, default='standard',
                         choices=['standard', 'enhanced'],
@@ -247,7 +278,7 @@ def main():
                         help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs')
-    parser.add_argument('--optimizer', type=str, default='adam',
+    parser.add_argument('--optimizer', type=str, default='sgd',
                         choices=['sgd', 'adam'],
                         help='Optimizer to use')
     parser.add_argument('--learning_rate', type=float, default=0.00001,
