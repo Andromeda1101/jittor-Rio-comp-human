@@ -6,6 +6,10 @@ from dataset.format import parents
 from PCT.networks.cls.unifiedpct import UnifiedPointTransformer
 from PCT.networks.cls.pct import Point_Transformer2
 from .bone_constraints import BoneConstraints
+import numpy as np
+import math
+
+jt.flags.use_cuda = 1
 
 class UnifiedModel(nn.Module):
     def __init__(self, feat_dim=256, num_joints=22, transformer_name='unified'):
@@ -30,9 +34,9 @@ class UnifiedModel(nn.Module):
         # 添加骨骼约束
         self.bone_constraints = BoneConstraints()
         
-        # 修改关节预测器，使用分层预测
-        self.joint_predictor = HierarchicalJointPredictor(
-            in_channels=512 + 256 + 128 + 64,
+        # 使用前向运动学(FK)解码器替代原有的分层预测器
+        self.joint_predictor = ForwardKinematicsDecoder(
+            in_dim=512 + 256 + 128 + 64,
             num_joints=num_joints
         )
         
@@ -102,7 +106,6 @@ class UnifiedModel(nn.Module):
         # 连接多尺度特征
         multi_scale_features = concat(pyramid_features, dim=1)
         joint_pred = self.joint_predictor(multi_scale_features)
-        joint_pred = joint_pred.view(-1, self.num_joints, 3)
         
         # 蒙皮特征准备
         B, _, N = vertices.shape
@@ -246,50 +249,108 @@ class ResidualConvBlock(nn.Module):
         out += residual
         return self.relu(out)
 
-class HierarchicalJointPredictor(nn.Module):
-    def __init__(self, in_channels, num_joints):
+# 前向运动学解码器替代原有的分层预测器
+class ForwardKinematicsDecoder(nn.Module):
+    def __init__(self, in_dim, num_joints):
         super().__init__()
         self.num_joints = num_joints
         
         # 共享特征提取
         self.shared_mlp = nn.Sequential(
-            nn.Linear(in_channels, 512),
+            nn.Linear(in_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(0.2),
         )
         
-        # 分层预测各个关节
+        # 每个关节的局部变换预测器
         self.joint_predictors = nn.ModuleList()
         for i in range(num_joints):
-            # 每个关节预测器获取父节点信息
-            input_dim = 512 + (3 if parents[i] is not None else 0)
-            self.joint_predictors.append(
-                nn.Sequential(
-                    nn.Linear(input_dim, 256),
-                    nn.ReLU(),
-                    nn.Linear(256, 3)
-                )
+            predictor = nn.Sequential(
+                nn.Linear(512, 256),
+                nn.ReLU(),
+                nn.Linear(256, 6)  # 3D位置 + 3D旋转
             )
+            self.joint_predictors.append(predictor)
     
-    def execute(self, x):
-        batch_size = x.shape[0]
-        shared_features = self.shared_mlp(x)
+    def execute(self, global_feat):
+        B = global_feat.size(0)
+        shared_features = self.shared_mlp(global_feat)
+        joint_transforms = []
         
-        # 按照骨骼层次结构预测关节
-        joint_positions = []
+        # 预测每个关节的局部变换
+        for i in range(self.num_joints):
+            params = self.joint_predictors[i](shared_features)
+            position = params[:, :3]
+            rotation = self._rotation_from_6d(params)
+            joint_transforms.append((position, rotation))
+        
+        # 应用前向运动学计算绝对位置
+        absolute_positions = []
         for i in range(self.num_joints):
             if parents[i] is None:
-                # 根节点直接预测
-                joint_pos = self.joint_predictors[i](shared_features)
+                # 根节点直接使用预测位置
+                pos = joint_transforms[i][0]
             else:
-                # 非根节点基于父节点位置预测
-                parent_pos = joint_positions[parents[i]]
-                features = jt.concat([shared_features, parent_pos], dim=1)
-                joint_pos = self.joint_predictors[i](features)
-                # 相对位置预测
-                joint_pos = parent_pos + joint_pos
+                # 非根节点：应用父节点变换
+                parent_pos = absolute_positions[parents[i]]
+                parent_rot = joint_transforms[parents[i]][1]
+                local_pos = joint_transforms[i][0]
                 
-            joint_positions.append(joint_pos)
+                # 应用旋转变换
+                rotated_pos = jt.matmul(parent_rot, local_pos.unsqueeze(-1)).squeeze(-1)
+                pos = parent_pos + rotated_pos
+            absolute_positions.append(pos)
+        
+        return jt.stack(absolute_positions, dim=1)  # [B, num_joints, 3]
+    
+    def _rotation_from_6d(self, params):
+        # 将6D旋转表示转换为旋转矩阵
+        # params: [B, 6]
+        a1, a2 = params[:, :3], params[:, 3:]
+        
+        # 正交化过程
+        b1 = a1 / (jt.norm(a1, dim=1, keepdim=True) + 1e-6)
+        b2 = a2 - jt.sum(b1 * a2, dim=1, keepdim=True) * b1
+        b2 = b2 / (jt.norm(b2, dim=1, keepdim=True) + 1e-6)
+        b3 = jt.cross(b1, b2)
+        
+        # 组合旋转矩阵
+        return jt.stack([b1, b2, b3], dim=-1)
+
+# 增强的骨骼约束模块（添加对称性约束）
+class EnhancedBoneConstraints(BoneConstraints):
+    def compute_anatomical_loss(self, joints):
+        """
+        增强的解剖学约束损失
+        包含骨骼长度、关节角度和对称性约束
+        """
+        # 1. 骨骼长度约束
+        length_loss = self.compute_bone_length_loss(joints)
+        
+        # 2. 关节角度约束
+        angle_loss = self.compute_joint_angle_loss(joints)
+        
+        # 3. 左右对称约束
+        symmetry_loss = 0
+        left_joints = [6,7,8,9,14,15,16,17]  # 左半身关节
+        right_joints = [10,11,12,13,18,19,20,21] # 右半身关节
+        
+        for l, r in zip(left_joints, right_joints):
+            left_pos = joints[:, l]
+            right_pos = joints[:, r]
             
-        return jt.stack(joint_positions, dim=1)  # [B, num_joints, 3]
+            # 计算镜像位置
+            mirrored_right = right_pos * jt.array([-1, 1, 1])
+            
+            # 对称损失
+            symmetry_loss += jt.mean(jt.norm(left_pos - mirrored_right, dim=1))
+        
+        # 4. 运动链平滑约束
+        chain_loss = self.compute_chain_consistency(joints)
+        
+        return (length_loss + 0.5*angle_loss + 
+                0.3*symmetry_loss + 0.2*chain_loss)
+    
+    def compute_constraint_loss(self, joints):
+        return self.compute_anatomical_loss(joints)

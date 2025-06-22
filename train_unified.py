@@ -1,3 +1,4 @@
+import math
 import jittor as jt
 import numpy as np
 import os
@@ -14,12 +15,66 @@ from dataset.dataset import get_dataloader, transform
 from dataset.format import id_to_name, parents
 from dataset.sampler import SamplerMix
 from models.metrics import J2J
-from models.unified import UnifiedModel
-from models.bone_constraints import BoneConstraints
+from models.unified import UnifiedModel, EnhancedBoneConstraints  # 使用增强的骨骼约束
 from dataset.exporter import Exporter
 
 # Set Jittor flags
-jt.flags.use_cuda = 1
+jt.flags.use_cuda = 0
+
+# 姿势感知的数据增强
+# def pose_aware_augmentation(vertices, joints, skin):
+#     # 随机选择枢轴关节
+#     pivot_id = random.choice([1, 3, 14, 18])  # 脊柱/大腿根部
+    
+#     # 随机旋转角度
+#     angle = random.uniform(-30, 30) * math.pi / 180  # 转换为弧度
+#     axis = random.choice([0, 1, 2])  # 0:x, 1:y, 2:z
+    
+#     # 创建旋转矩阵
+#     if axis == 0:  # x轴
+#         rot_matrix = jt.array([
+#             [1, 0, 0],
+#             [0, math.cos(angle), -math.sin(angle)],
+#             [0, math.sin(angle), math.cos(angle)]
+#         ])
+#     elif axis == 1:  # y轴
+#         rot_matrix = jt.array([
+#             [math.cos(angle), 0, math.sin(angle)],
+#             [0, 1, 0],
+#             [-math.sin(angle), 0, math.cos(angle)]
+#         ])
+#     else:  # z轴
+#         rot_matrix = jt.array([
+#             [math.cos(angle), -math.sin(angle), 0],
+#             [math.sin(angle), math.cos(angle), 0],
+#             [0, 0, 1]
+#         ])
+    
+#     # 枢轴点位置
+#     pivot_point = joints[:, pivot_id].unsqueeze(1)
+    
+#     # 应用旋转到受影响的关节
+#     for j in range(joints.shape[1]):
+#         if j != pivot_id:  # 枢轴点不旋转
+#             # 计算相对于枢轴点的向量
+#             vec = joints[:, j] - pivot_point.squeeze(1)
+#             # 应用旋转
+#             rotated_vec = jt.matmul(vec.unsqueeze(1), rot_matrix).squeeze(1)
+#             # 更新位置
+#             joints[:, j] = pivot_point.squeeze(1) + rotated_vec
+    
+#     # 应用旋转到受影响的顶点
+#     for v in range(vertices.shape[2]):
+#         # 检查顶点是否受枢轴关节影响
+#         if skin[:, v, pivot_id].max() > 0.1:  # 简单阈值判断
+#             # 计算相对于枢轴点的向量
+#             vec = vertices[:, :, v].permute(0, 2, 1) - pivot_point
+#             # 应用旋转
+#             rotated_vec = jt.matmul(vec, rot_matrix)
+#             # 更新位置
+#             vertices[:, :, v] = (pivot_point + rotated_vec).permute(0, 2, 1)
+    
+#     return vertices, joints
 
 def train(args):
     # 初始化wandb
@@ -72,7 +127,6 @@ def train(args):
     )
 
     # 创建损失函数
-    # criterion_joint = nn.MSELoss()
     criterion_skin_mse = nn.MSELoss()
     criterion_skin_l1 = nn.L1Loss()
 
@@ -151,7 +205,13 @@ def train(args):
             'rel_pos_loss': rel_pos_loss
         }
     
-    # 创建数据加载器
+    # 创建数据加载器 - 添加姿势感知增强
+    # def augmented_transform(vertices, joints, skin):
+        # # 以一定概率应用姿势感知增强
+        # if random.random() < 0.7:  # 70%的概率应用增强
+        #     vertices, joints = pose_aware_augmentation(vertices, joints, skin)
+        # return vertices, joints, skin
+    
     train_loader = get_dataloader(
         data_root=args.data_root,
         data_list=args.train_data_list,
@@ -159,7 +219,8 @@ def train(args):
         batch_size=args.batch_size,
         shuffle=True,
         sampler=SamplerMix(num_samples=1024, vertex_samples=512),
-        transform=transform,
+        # transform=augmented_transform,  # 使用增强后的变换
+        transform=transform,  # 使用原始变换
     )
     
     if args.val_data_list:
@@ -179,7 +240,28 @@ def train(args):
     best_loss = float('inf')
     no_improve_epochs = 0
     
+    # 分阶段训练设置
+    joint_only_epochs = int(args.epochs * 0.4)  # 40%时间只训练骨骼
+    skin_only_epochs = int(args.epochs * 0.3)   # 30%时间只训练蒙皮
+    
     for epoch in range(args.epochs):
+        # 分阶段训练控制
+        if epoch < joint_only_epochs:
+            # 阶段1：只训练骨骼预测
+            model.skin_predictor.requires_grad = False
+            model.joint_predictor.requires_grad = True
+            log_message(f"Epoch {epoch+1}: Training JOINT only")
+        elif epoch < joint_only_epochs + skin_only_epochs:
+            # 阶段2：只训练蒙皮预测
+            model.skin_predictor.requires_grad = True
+            model.joint_predictor.requires_grad = False
+            log_message(f"Epoch {epoch+1}: Training SKIN only")
+        else:
+            # 阶段3：联合训练
+            model.skin_predictor.requires_grad = True
+            model.joint_predictor.requires_grad = True
+            log_message(f"Epoch {epoch+1}: Training JOINT and SKIN jointly")
+        
         model.train()
         train_joint_loss = 0.0
         train_skin_l1loss = 0.0
