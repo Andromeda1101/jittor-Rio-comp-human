@@ -74,7 +74,7 @@ def train(args):
     criterion_skin_mse = nn.MSELoss()
     criterion_skin_l1 = nn.L1Loss()
 
-    # 新的蒙皮损失：KL散度 + 正则化项
+    # 蒙皮损失：KL散度 + 正则化项
     def SkinLoss(pred, target, vertices, joints):
         # KL散度损失
         criterion_kl_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
@@ -215,7 +215,6 @@ def train(args):
                 with jt.no_grad():
                     joint_pred, skin_pred = model(vertices)  # 输出 (B, 22, 3), (B, N, 22)
                 
-                # 调整joints格式以匹配预测结果
                 joints = joints.reshape(joint_pred.shape)  # 确保为 (B, 22, 3)
 
                 # 计算损失

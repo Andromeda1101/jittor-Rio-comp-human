@@ -22,7 +22,7 @@ class UnifiedModel(nn.Module):
             nn.Linear(512, num_joints * 3)
         )
         
-        # 增强的顶点特征提取
+        #增强的顶点特征提取
         self.vertex_encoder = nn.Sequential(
             nn.Linear(3 + feat_dim, 512),
             nn.BatchNorm1d(512),
@@ -47,9 +47,9 @@ class UnifiedModel(nn.Module):
             MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
         ])
         
-        # 改进的蒙皮预测分支 - 调整维度处理
+        # 蒙皮预测分支
         self.skin_predictor = nn.Sequential(
-            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),  # 输入通道增加到4倍
+            nn.Conv1d(feat_dim * 4, feat_dim * 2, 1),  
             nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
             ResidualConvBlock(feat_dim * 2, feat_dim * 2),
@@ -106,7 +106,7 @@ class UnifiedModel(nn.Module):
         # 调整维度以适应Conv1d
         fusion_feat = fusion_feat.permute(0, 2, 1)  # (B, feat_dim*3, N)
         
-        # 改进的距离约束计算
+        # 距离约束计算
         vertices_3d = vertices.permute(0, 2, 1)  # (B, N, 3)
         dist = jt.norm(vertices_3d.unsqueeze(2) - joint_pred.unsqueeze(1), dim=-1)  # (B, N, J)
         dist_weight = jt.exp(-dist * 0.1)  # 软化的距离权重
@@ -138,7 +138,7 @@ class ResidualBlock(nn.Module):
         out += residual
         return self.relu(out)
 
-# 新增卷积残差块
+# 卷积残差块
 class ResidualConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
