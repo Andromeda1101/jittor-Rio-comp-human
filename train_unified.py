@@ -106,9 +106,9 @@ def train(args):
         
         # 组合损失
         total_loss = (weighted_kl_loss + 
-                      0.1 * spatial_smoothness + 
-                      0.05 * sparsity_loss + 
-                      0.1 * validity_loss)
+                      0.3 * spatial_smoothness + 
+                      0.25 * sparsity_loss + 
+                      0.3 * validity_loss)
         
         return total_loss
     
@@ -146,17 +146,23 @@ def train(args):
         # 新增：计算相对位置一致性损失
         rel_pos_loss = compute_relative_position_loss(joint_pred, joints)
         
+        # 计算改进的蒙皮损失
+        skin_constraint_loss = model.skin_constraints.compute_constraint_loss(
+            skin_pred, vertices.permute(0, 2, 1), joint_pred
+        )
+        
         # 总损失，调整权重
         total_loss = (joint_loss + 
-                     args.skin_weight * skin_klloss + 
+                     args.skin_weight * skin_constraint_loss +  # 使用新的蒙皮约束损失
                      args.constraint_weight * constraint_loss +
-                     0.5 * rel_pos_loss)  # 新增相对位置损失
+                     0.5 * rel_pos_loss)
         
         return total_loss, {
             'joint_loss': joint_loss,
             'skin_mse': skin_mseloss,
             'skin_l1': skin_l1loss,
             'skin_kl': skin_klloss,
+            'skin_constraint_loss': skin_constraint_loss,
             'constraint_loss': constraint_loss,
             'rel_pos_loss': rel_pos_loss
         }
@@ -187,6 +193,7 @@ def train(args):
     
     # 训练循环
     best_loss = float('inf')
+    best_l1loss = float('inf')
     no_improve_epochs = 0
     
     for epoch in range(args.epochs):
@@ -252,8 +259,10 @@ def train(args):
         log_message(f"Epoch [{epoch+1}/{args.epochs}] "
                    f"Train Joint Loss: {train_joint_loss:.4f} "
                    f"Train Skin MSE Loss: {train_skin_mseloss:.4f} "
+
                    f"Train Skin L1 Loss: {train_skin_l1loss:.4f} "
                    f"Train Skin KL Loss: {train_skin_klloss:.4f} "
+                   
                    f"Train Constraint Loss: {train_constraint_loss:.4f} "
                    f"Time: {epoch_time:.2f}s")
         
@@ -318,7 +327,7 @@ def train(args):
             l1_loss /= len(val_loader)
             mse_loss /= len(val_loader)
             J2J_loss /= len(val_loader)
-            val_loss = J2J_loss + 0.8 * args.skin_weight * l1_loss
+            val_loss = J2J_loss + l1_loss
             
             log_message(f"Validation J2J Loss: {J2J_loss:.4f} "
                       f"Skin MSE Loss: {mse_loss:.4f} "

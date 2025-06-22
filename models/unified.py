@@ -6,6 +6,7 @@ from dataset.format import parents
 from PCT.networks.cls.unifiedpct import UnifiedPointTransformer
 from PCT.networks.cls.pct import Point_Transformer2
 from .bone_constraints import BoneConstraints
+from .skin_constraints import SkinConstraints
 
 class UnifiedModel(nn.Module):
     def __init__(self, feat_dim=256, num_joints=22, transformer_name='unified'):
@@ -68,11 +69,11 @@ class UnifiedModel(nn.Module):
             SpatialAwareModule(feat_dim * 4, feat_dim * 2),
             nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
-            LightweightSEConv(feat_dim * 2),
             LocalityConstrainedPredictor(feat_dim * 2, feat_dim * 2, num_joints),
             nn.BatchNorm1d(feat_dim * 2),
             nn.ReLU(),
             nn.Conv1d(feat_dim * 2, num_joints, 1),
+            nn.Softplus()  # 确保输出非负
         )
         
         # 添加距离阈值参数
@@ -80,6 +81,9 @@ class UnifiedModel(nn.Module):
         
         # 新增：自适应加权融合模块
         self.fusion_weights = nn.Parameter(jt.ones(4))  # 4个注意力输出的权重
+        
+        # 添加蒙皮约束
+        self.skin_constraints = SkinConstraints()
     
     def _make_res_block(self, in_dim, hidden_dim, out_dim):
         return nn.Sequential(
@@ -159,12 +163,15 @@ class UnifiedModel(nn.Module):
         # 创建距离掩码
         distance_mask = jt.exp(-distances * 5.0)  # 软化的距离掩码
         
-        # 预测蒙皮权重并应用掩码
+        # 预测蒙皮权重
         skin_logits = self.skin_predictor(fusion_feat)  # [B, J, N]
-        skin_weights = nn.softmax(skin_logits, dim=1)  # [B, J, N]
         
-        # 应用距离掩码和重新归一化
-        skin_weights = skin_weights * distance_mask.permute(0, 2, 1)
+        # 计算距离权重
+        distance_weights = self.skin_constraints.compute_distance_weights(vertices_3d, joint_pred)
+        
+        # 使用Softmax并应用距离掩码
+        skin_weights = nn.softmax(skin_logits * 5.0, dim=1)  # 添加温度系数
+        skin_weights = skin_weights * distance_weights.permute(0, 2, 1)
         skin_weights = skin_weights / (skin_weights.sum(dim=1, keepdim=True) + 1e-6)
         
         skin_weights = skin_weights.permute(0, 2, 1)  # [B, N, J]
