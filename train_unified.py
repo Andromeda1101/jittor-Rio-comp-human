@@ -127,7 +127,8 @@ def train(args):
     # 训练循环
     best_loss = float('inf')
     no_improve_epochs = 0
-    
+    stop1 = 0  # 用于早停
+
     for epoch in range(args.epochs):
         model.train()
         train_joint_loss = 0.0
@@ -255,25 +256,41 @@ def train(args):
             val_joint_loss /= len(val_loader)
             l1_loss /= len(val_loader)
             mse_loss /= len(val_loader)
+            J2J_loss /= len(val_loader)
             total_val_loss = val_joint_loss + args.skin_weight * (l1_loss + mse_loss)
             
-            log_message(f"Validation J2J Loss: {val_joint_loss:.4f} "
+            log_message(f"Validation J2J Loss: {J2J_loss:.4f} "
                       f"Skin MSE Loss: {mse_loss:.4f} "
                       f"Skin L1 Loss: {l1_loss:.4f} "
                       )
             
-            # 保存最佳模型
-            if l1_loss < best_loss:
-                best_loss = l1_loss
-                model_path = os.path.join(args.output_dir, 'best_model.pkl')
-                model.save(model_path)
-                log_message(f"Saved best model with L1 loss {best_loss:.4f} to {model_path}")
-                no_improve_epochs = 0
+            if stop1 == 0:
+                # 保存最佳模型
+                if l1_loss < best_loss:
+                    best_loss = l1_loss
+                    model_path = os.path.join(args.output_dir, 'best_model.pkl')
+                    model.save(model_path)
+                    log_message(f"Saved best model with L1 loss {l1_loss:.4f} to {model_path}")
+                    no_improve_epochs = 0
+                else:
+                    no_improve_epochs += 1
+                    if no_improve_epochs >= args.patience // 2:
+                        log_message(f"Early stopping 1 triggered after {epoch+1} epochs")
+                        stop1 = 1
+                        no_improve_epochs = 0
+                        best_loss = J2J_loss + l1_loss
             else:
-                no_improve_epochs += 1
-                if no_improve_epochs >= args.patience:
-                    log_message(f"Early stopping triggered after {epoch+1} epochs")
-                    break
+                if J2J_loss + l1_loss < best_loss:
+                    best_loss = J2J_loss + l1_loss
+                    model_path = os.path.join(args.output_dir, 'best_model.pkl')
+                    model.save(model_path)
+                    log_message(f"Saved best model with J2J loss {J2J_loss:.4f} and L1 loss {l1_loss:.4f} to {model_path}")
+                    no_improve_epochs = 0
+                else:
+                    no_improve_epochs += 1
+                    if no_improve_epochs >= args.patience:
+                        log_message(f"Early stopping 2 triggered after {epoch+1} epochs")
+                        break
         
         # 保存检查点
         if (epoch + 1) % args.save_freq == 0:
