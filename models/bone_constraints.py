@@ -324,7 +324,7 @@ class BoneConstraints:
         for i in range(B):
             # 计算最佳拟合平面的法向量
             centered = planar_joints[i] - jt.mean(planar_joints[i], dim=0, keepdim=True)
-            _, _, vh = jt.svd(centered)
+            _, _, vh = jt.linalg.svd(centered)
             normal = vh[-1]  # 最小特征值对应的向量为法向量
             
             # 计算每个点到平面的距离
