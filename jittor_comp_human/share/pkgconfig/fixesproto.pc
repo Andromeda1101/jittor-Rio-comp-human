@@ -1,0 +1,8 @@
+prefix=/work/home/s2023012121/miniconda3/envs/jittor_comp_human
+includedir=${prefix}/include
+
+Name: FixesProto
+Description: X Fixes extension headers
+Version: 6.1
+Cflags: -I${includedir}
+Requires: xextproto >= 7.0.99.1

@@ -1,0 +1,48 @@
+{
+  "build": "hb92f740_13",
+  "build_number": 13,
+  "channel": "https://conda.anaconda.org/conda-forge",
+  "constrains": [],
+  "depends": [
+    "gcc 10.4.0.*",
+    "gxx_impl_linux-64 10.4.0.*"
+  ],
+  "extracted_package_dir": "/work/home/s2023012121/miniconda3/pkgs/gxx-10.4.0-hb92f740_13",
+  "files": [
+    "bin/c++",
+    "bin/g++"
+  ],
+  "fn": "gxx-10.4.0-hb92f740_13.conda",
+  "license": "BSD-3-Clause",
+  "link": {
+    "source": "/work/home/s2023012121/miniconda3/pkgs/gxx-10.4.0-hb92f740_13",
+    "type": 1
+  },
+  "md5": "95e3caa43cddbe50a9147f78010689c9",
+  "name": "gxx",
+  "package_tarball_full_path": "/work/home/s2023012121/miniconda3/pkgs/gxx-10.4.0-hb92f740_13.conda",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "bin/c++",
+        "path_type": "softlink",
+        "sha256": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "size_in_bytes": 1161616
+      },
+      {
+        "_path": "bin/g++",
+        "path_type": "softlink",
+        "sha256": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "size_in_bytes": 1161616
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "gxx=10",
+  "sha256": "3bbcfbdb4a394ead7b9767666c2fd4f86a1fc79507576ab86a336967c946aaff",
+  "size": 25928,
+  "subdir": "linux-64",
+  "timestamp": 1682617667000,
+  "url": "https://conda.anaconda.org/conda-forge/linux-64/gxx-10.4.0-hb92f740_13.conda",
+  "version": "10.4.0"
+}

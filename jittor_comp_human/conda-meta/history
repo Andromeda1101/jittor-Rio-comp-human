@@ -1,0 +1,148 @@
+==> 2025-06-12 00:53:38 <==
+# cmd: /work/home/s2023012121/miniconda3/bin/conda create -n jittor_comp_human python=3.9
+# conda version: 25.3.1
++defaults/linux-64::_libgcc_mutex-0.1-main
++defaults/linux-64::_openmp_mutex-5.1-1_gnu
++defaults/linux-64::bzip2-1.0.8-h5eee18b_6
++defaults/linux-64::ca-certificates-2025.2.25-h06a4308_0
++defaults/linux-64::expat-2.7.1-h6a678d5_0
++defaults/linux-64::ld_impl_linux-64-2.40-h12ee557_0
++defaults/linux-64::libffi-3.4.4-h6a678d5_1
++defaults/linux-64::libgcc-ng-11.2.0-h1234567_1
++defaults/linux-64::libgomp-11.2.0-h1234567_1
++defaults/linux-64::libstdcxx-ng-11.2.0-h1234567_1
++defaults/linux-64::libxcb-1.17.0-h9b100fa_0
++defaults/linux-64::ncurses-6.4-h6a678d5_0
++defaults/linux-64::openssl-3.0.16-h5eee18b_0
++defaults/linux-64::pthread-stubs-0.3-h0ce48e5_1
++defaults/linux-64::python-3.9.23-he99959a_0
++defaults/linux-64::readline-8.2-h5eee18b_0
++defaults/linux-64::setuptools-78.1.1-py39h06a4308_0
++defaults/linux-64::sqlite-3.45.3-h5eee18b_0
++defaults/linux-64::tk-8.6.14-h993c535_1
++defaults/linux-64::wheel-0.45.1-py39h06a4308_0
++defaults/linux-64::xorg-libx11-1.8.12-h9b100fa_1
++defaults/linux-64::xorg-libxau-1.0.12-h9b100fa_0
++defaults/linux-64::xorg-libxdmcp-1.1.5-h9b100fa_0
++defaults/linux-64::xorg-xorgproto-2024.1-h5eee18b_1
++defaults/linux-64::xz-5.6.4-h5eee18b_1
++defaults/linux-64::zlib-1.2.13-h5eee18b_1
++defaults/noarch::pip-25.1-pyhc872135_2
++defaults/noarch::tzdata-2025b-h04d1e81_0
+# update specs: ['python=3.9']
+==> 2025-06-12 00:54:15 <==
+# cmd: /work/home/s2023012121/miniconda3/bin/conda install -c conda-forge gcc=10 gxx=10
+# conda version: 25.3.1
+-defaults/linux-64::ca-certificates-2025.2.25-h06a4308_0
++conda-forge/linux-64::gcc-10.4.0-hb92f740_13
++conda-forge/linux-64::gcc_impl_linux-64-10.4.0-h5231bdf_19
++conda-forge/linux-64::gxx-10.4.0-hb92f740_13
++conda-forge/linux-64::gxx_impl_linux-64-10.4.0-h5231bdf_19
++conda-forge/linux-64::libgcc-devel_linux-64-10.4.0-hd38fd1e_19
++conda-forge/linux-64::libsanitizer-10.4.0-h5246dfb_19
++conda-forge/linux-64::libstdcxx-devel_linux-64-10.4.0-hd38fd1e_19
++conda-forge/noarch::ca-certificates-2025.4.26-hbd8a1cb_0
++conda-forge/noarch::kernel-headers_linux-64-3.10.0-he073ed8_18
++conda-forge/noarch::sysroot_linux-64-2.17-h0157908_18
++defaults/linux-64::binutils_impl_linux-64-2.40-h5293946_0
+# update specs: ['gcc=10', 'gxx=10']
+==> 2025-06-22 12:44:09 <==
+# cmd: /work/home/s2023012121/miniconda3/bin/conda install -c conda-forge cupy
+# conda version: 25.3.1
+-conda-forge/noarch::ca-certificates-2025.4.26-hbd8a1cb_0
++conda-forge/linux-64::cudatoolkit-10.2.89-h713d32c_10
++conda-forge/linux-64::cupy-12.1.0-py39h98de0c3_0
++conda-forge/linux-64::fastrlock-0.8-py39h5a03fae_2
++conda-forge/linux-64::python_abi-3.9-2_cp39
++conda-forge/noarch::ca-certificates-2025.6.15-hbd8a1cb_0
++conda-forge/noarch::cuda-version-10.2-h4767cc1_3
++pypi/pypi::annotated-types-0.7.0-pypi_0
++pypi/pypi::astunparse-1.6.3-pypi_0
++pypi/pypi::certifi-2025.6.15-pypi_0
++pypi/pypi::charset-normalizer-3.4.2-pypi_0
++pypi/pypi::click-8.1.8-pypi_0
++pypi/pypi::contourpy-1.3.0-pypi_0
++pypi/pypi::cycler-0.12.1-pypi_0
++pypi/pypi::eval-type-backport-0.2.2-pypi_0
++pypi/pypi::fonttools-4.58.2-pypi_0
++pypi/pypi::gitdb-4.0.12-pypi_0
++pypi/pypi::gitpython-3.1.44-pypi_0
++pypi/pypi::idna-3.10-pypi_0
++pypi/pypi::importlib-resources-6.5.2-pypi_0
++pypi/pypi::jittor-1.3.9.14-pypi_0
++pypi/pypi::kiwisolver-1.4.7-pypi_0
++pypi/pypi::matplotlib-3.9.4-pypi_0
++pypi/pypi::numpy-1.26.4-pypi_0
++pypi/pypi::packaging-25.0-pypi_0
++pypi/pypi::pillow-11.2.1-pypi_0
++pypi/pypi::platformdirs-4.3.8-pypi_0
++pypi/pypi::protobuf-6.31.1-pypi_0
++pypi/pypi::psutil-7.0.0-pypi_0
++pypi/pypi::pydantic-2.11.7-pypi_0
++pypi/pypi::pydantic-core-2.33.2-pypi_0
++pypi/pypi::pyparsing-3.2.3-pypi_0
++pypi/pypi::python-dateutil-2.9.0.post0-pypi_0
++pypi/pypi::pyyaml-6.0.2-pypi_0
++pypi/pypi::requests-2.32.4-pypi_0
++pypi/pypi::scipy-1.13.1-pypi_0
++pypi/pypi::sentry-sdk-2.30.0-pypi_0
++pypi/pypi::setproctitle-1.3.6-pypi_0
++pypi/pypi::six-1.17.0-pypi_0
++pypi/pypi::smmap-5.0.2-pypi_0
++pypi/pypi::tqdm-4.67.1-pypi_0
++pypi/pypi::trimesh-4.6.11-pypi_0
++pypi/pypi::typing-extensions-4.14.0-pypi_0
++pypi/pypi::typing-inspection-0.4.1-pypi_0
++pypi/pypi::urllib3-2.4.0-pypi_0
++pypi/pypi::wandb-0.20.1-pypi_0
++pypi/pypi::zipp-3.23.0-pypi_0
+# update specs: ['cupy']
+==> 2025-06-22 13:09:49 <==
+# cmd: /work/home/s2023012121/miniconda3/bin/conda remove -n jittor_comp_human -y cuda-version cudatoolkit cupy fastrlock python_abi
+# conda version: 25.3.1
+-conda-forge/linux-64::cudatoolkit-10.2.89-h713d32c_10
+-conda-forge/linux-64::cupy-12.1.0-py39h98de0c3_0
+-conda-forge/linux-64::fastrlock-0.8-py39h5a03fae_2
+-conda-forge/linux-64::python_abi-3.9-2_cp39
+-conda-forge/noarch::cuda-version-10.2-h4767cc1_3
+-pypi/pypi::annotated-types-0.7.0-pypi_0
+-pypi/pypi::astunparse-1.6.3-pypi_0
+-pypi/pypi::certifi-2025.6.15-pypi_0
+-pypi/pypi::charset-normalizer-3.4.2-pypi_0
+-pypi/pypi::click-8.1.8-pypi_0
+-pypi/pypi::contourpy-1.3.0-pypi_0
+-pypi/pypi::cycler-0.12.1-pypi_0
+-pypi/pypi::eval-type-backport-0.2.2-pypi_0
+-pypi/pypi::fonttools-4.58.2-pypi_0
+-pypi/pypi::gitdb-4.0.12-pypi_0
+-pypi/pypi::gitpython-3.1.44-pypi_0
+-pypi/pypi::idna-3.10-pypi_0
+-pypi/pypi::importlib-resources-6.5.2-pypi_0
+-pypi/pypi::jittor-1.3.9.14-pypi_0
+-pypi/pypi::kiwisolver-1.4.7-pypi_0
+-pypi/pypi::matplotlib-3.9.4-pypi_0
+-pypi/pypi::numpy-1.26.4-pypi_0
+-pypi/pypi::packaging-25.0-pypi_0
+-pypi/pypi::pillow-11.2.1-pypi_0
+-pypi/pypi::platformdirs-4.3.8-pypi_0
+-pypi/pypi::protobuf-6.31.1-pypi_0
+-pypi/pypi::psutil-7.0.0-pypi_0
+-pypi/pypi::pydantic-2.11.7-pypi_0
+-pypi/pypi::pydantic-core-2.33.2-pypi_0
+-pypi/pypi::pyparsing-3.2.3-pypi_0
+-pypi/pypi::python-dateutil-2.9.0.post0-pypi_0
+-pypi/pypi::pyyaml-6.0.2-pypi_0
+-pypi/pypi::requests-2.32.4-pypi_0
+-pypi/pypi::scipy-1.13.1-pypi_0
+-pypi/pypi::sentry-sdk-2.30.0-pypi_0
+-pypi/pypi::setproctitle-1.3.6-pypi_0
+-pypi/pypi::six-1.17.0-pypi_0
+-pypi/pypi::smmap-5.0.2-pypi_0
+-pypi/pypi::tqdm-4.67.1-pypi_0
+-pypi/pypi::trimesh-4.6.11-pypi_0
+-pypi/pypi::typing-extensions-4.14.0-pypi_0
+-pypi/pypi::typing-inspection-0.4.1-pypi_0
+-pypi/pypi::urllib3-2.4.0-pypi_0
+-pypi/pypi::wandb-0.20.1-pypi_0
+-pypi/pypi::zipp-3.23.0-pypi_0
+# remove specs: ['cudatoolkit', 'cuda-version', 'fastrlock', 'python_abi', 'cupy']

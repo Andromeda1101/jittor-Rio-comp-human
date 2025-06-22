@@ -1,0 +1,115 @@
+{
+  "build": "h5231bdf_19",
+  "build_number": 19,
+  "channel": "https://conda.anaconda.org/conda-forge",
+  "constrains": [],
+  "depends": [
+    "gcc_impl_linux-64 10.4.0 h5231bdf_19",
+    "libstdcxx-devel_linux-64 10.4.0 hd38fd1e_19",
+    "sysroot_linux-64"
+  ],
+  "extracted_package_dir": "/work/home/s2023012121/miniconda3/pkgs/gxx_impl_linux-64-10.4.0-h5231bdf_19",
+  "files": [
+    "bin/x86_64-conda-linux-gnu-c++",
+    "bin/x86_64-conda-linux-gnu-g++",
+    "bin/x86_64-conda_cos6-linux-gnu-c++",
+    "bin/x86_64-conda_cos6-linux-gnu-g++",
+    "lib/-gdb.py",
+    "libexec/gcc/x86_64-conda-linux-gnu/10.4.0/cc1plus",
+    "share/gcc-10.4.0/python/libstdcxx/__init__.py",
+    "share/gcc-10.4.0/python/libstdcxx/v6/__init__.py",
+    "share/gcc-10.4.0/python/libstdcxx/v6/printers.py",
+    "share/gcc-10.4.0/python/libstdcxx/v6/xmethods.py"
+  ],
+  "fn": "gxx_impl_linux-64-10.4.0-h5231bdf_19.tar.bz2",
+  "license": "GPL-3.0-only WITH GCC-exception-3.1",
+  "link": {
+    "source": "/work/home/s2023012121/miniconda3/pkgs/gxx_impl_linux-64-10.4.0-h5231bdf_19",
+    "type": 1
+  },
+  "md5": "de8c00c5162b819c3e8a7f64ed32baf1",
+  "name": "gxx_impl_linux-64",
+  "package_tarball_full_path": "/work/home/s2023012121/miniconda3/pkgs/gxx_impl_linux-64-10.4.0-h5231bdf_19.tar.bz2",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "bin/x86_64-conda-linux-gnu-c++",
+        "path_type": "hardlink",
+        "sha256": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "sha256_in_prefix": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "size_in_bytes": 1161616
+      },
+      {
+        "_path": "bin/x86_64-conda-linux-gnu-g++",
+        "path_type": "hardlink",
+        "sha256": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "sha256_in_prefix": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "size_in_bytes": 1161616
+      },
+      {
+        "_path": "bin/x86_64-conda_cos6-linux-gnu-c++",
+        "path_type": "softlink",
+        "sha256": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "size_in_bytes": 1161616
+      },
+      {
+        "_path": "bin/x86_64-conda_cos6-linux-gnu-g++",
+        "path_type": "softlink",
+        "sha256": "24405be60a846dd2420995433980e3c4dd3d9e6c8504a194e348914e787e39cb",
+        "size_in_bytes": 1161616
+      },
+      {
+        "_path": "lib/-gdb.py",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/home/conda/feedstock_root/build_artifacts/gcc_compilers_1666516817544/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placeho",
+        "sha256": "6b70d1ee9628e93fc0a67272780efe894b4d09f299f956adef42d8d3c21bffe9",
+        "sha256_in_prefix": "b6d8e013d4558609dad363ae200d0a63ba9858b95e56b8d239168cfbdd2a80a4",
+        "size_in_bytes": 2886
+      },
+      {
+        "_path": "libexec/gcc/x86_64-conda-linux-gnu/10.4.0/cc1plus",
+        "path_type": "hardlink",
+        "sha256": "2ca7266005b281e3959c3e4b71578ba9a659fac918a8e188b45b11dc0bd79c94",
+        "sha256_in_prefix": "2ca7266005b281e3959c3e4b71578ba9a659fac918a8e188b45b11dc0bd79c94",
+        "size_in_bytes": 31998408
+      },
+      {
+        "_path": "share/gcc-10.4.0/python/libstdcxx/__init__.py",
+        "path_type": "hardlink",
+        "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "sha256_in_prefix": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "size_in_bytes": 1
+      },
+      {
+        "_path": "share/gcc-10.4.0/python/libstdcxx/v6/__init__.py",
+        "path_type": "hardlink",
+        "sha256": "3c69a4a429940debb986f95afe1895926f45ee06fe6c27d707a69ee312d1a8e2",
+        "sha256_in_prefix": "3c69a4a429940debb986f95afe1895926f45ee06fe6c27d707a69ee312d1a8e2",
+        "size_in_bytes": 1161
+      },
+      {
+        "_path": "share/gcc-10.4.0/python/libstdcxx/v6/printers.py",
+        "path_type": "hardlink",
+        "sha256": "8b83b787f88beda937831e001602d7f399bb5b6b2f4b0cb311d35189ece34499",
+        "sha256_in_prefix": "8b83b787f88beda937831e001602d7f399bb5b6b2f4b0cb311d35189ece34499",
+        "size_in_bytes": 79027
+      },
+      {
+        "_path": "share/gcc-10.4.0/python/libstdcxx/v6/xmethods.py",
+        "path_type": "hardlink",
+        "sha256": "ca6e09e2be032e7fd192bd4655438ff3e8effacf2d270c7d84da41fb15616e3d",
+        "sha256_in_prefix": "ca6e09e2be032e7fd192bd4655438ff3e8effacf2d270c7d84da41fb15616e3d",
+        "size_in_bytes": 28188
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "bb4d5dd427a3788208737bbce28e3a2793371526aa11f8fa69d66596246ba39d",
+  "size": 12031310,
+  "subdir": "linux-64",
+  "timestamp": 1666519297000,
+  "url": "https://conda.anaconda.org/conda-forge/linux-64/gxx_impl_linux-64-10.4.0-h5231bdf_19.tar.bz2",
+  "version": "10.4.0"
+}
