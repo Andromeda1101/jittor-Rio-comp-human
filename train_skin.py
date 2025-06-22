@@ -19,7 +19,9 @@ from dataset.exporter import Exporter
 
 # Set Jittor flags
 jt.flags.use_cuda = 1
-
+def smooth_labels(labels, smoothing=0.1):
+    n_classes = labels.shape[-1]
+    return labels * (1 - smoothing) + smoothing / n_classes
 def train(args):
     """
     Main training function
@@ -67,7 +69,6 @@ def train(args):
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
-    
     # Create loss function
     criterion_mse = nn.MSELoss()
     criterion_l1 = nn.L1Loss()
@@ -99,7 +100,11 @@ def train(args):
     # Training loop
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
+    def cosine_annealing_lr(initial_lr, epoch, total_epochs):
+        return initial_lr * 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
     for epoch in range(args.epochs):
+        new_lr = cosine_annealing_lr(args.learning_rate, epoch, args.epochs)
+        optimizer.lr = new_lr
         # Dynamic constraint weight
         current_symm_weight = 0.1 * min(1.0, (epoch + 1) / 10)
 
@@ -115,13 +120,13 @@ def train(args):
             vertices, joints, skin = data['vertices'], data['joints'], data['skin']
             
             symm_map = data.get('symmetry_map', symmetry_map)
-
+            skin_smoothed = smooth_labels(skin, smoothing=0.1)
             vertices: jt.Var
             joints: jt.Var
             skin: jt.Var
             outputs = model(vertices, joints)
-            loss_mse = criterion_mse(outputs, skin)
-            loss_l1 = criterion_l1(outputs, skin)
+            loss_mse = criterion_mse(outputs, skin_smoothed)
+            loss_l1 = criterion_l1(outputs, skin_smoothed)
             base_loss = loss_mse + loss_l1
 
             # Apply skin symmetry constraint

@@ -1,4 +1,5 @@
 import jittor as jt
+from jittor import nn
 
 def J2J(
     joints_a: jt.Var,
@@ -79,7 +80,7 @@ def adaptive_joint_angle_constraint(pred_joints, angle_constraints):
         angle = jt.acos(cos_theta)
         
         # 只惩罚超过最大角度的部分
-        angle_violation = jt.relu(angle - max_angle)
+        angle_violation = nn.relu(angle - max_angle)
         loss += jt.mean(angle_violation ** 2)
         num_constraints += 1
     

@@ -4,7 +4,7 @@ import os
 import argparse
 import time
 import random
-import wandb
+# import wandb
 
 from jittor import nn
 from jittor import optim
@@ -16,7 +16,7 @@ from dataset.format import symmetric_bones, angle_constraints
 from models.skeleton import create_model
 
 from models.metrics import J2J, symmetric_bone_length_constraint, adaptive_joint_angle_constraint
-
+from collections import deque
 # Set Jittor flags
 jt.flags.use_cuda = 1
 
@@ -101,6 +101,8 @@ def train(args):
     # Training loop
     best_loss = 99999999
     no_improve_epochs = 0  # Counter for early stopping
+    smooth_J2J_window = deque(maxlen=5)  # 滑动窗口大小
+
     for epoch in range(args.epochs):
         current_symm_weight = 0.2 * min(1.0, (epoch + 1) / 10)
         current_angle_weight = 0.1 * min(1.0, (epoch + 1) / 10)
@@ -209,8 +211,11 @@ def train(args):
             val_loss /= len(val_loader)
             J2J_loss /= len(val_loader)
             
-            log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f}")
-            
+            # 计算滑动平均
+            smooth_J2J_window.append(J2J_loss)
+            avg_J2J = sum(smooth_J2J_window) / len(smooth_J2J_window)
+
+            log_message(f"Validation Loss: {val_loss:.4f} J2J Loss: {J2J_loss:.4f} Smoothed: {avg_J2J:.4f}")
             # Log validation metrics
             # wandb.log({
             #     "val_loss": val_loss,
@@ -218,17 +223,16 @@ def train(args):
             #     "epoch": epoch + 1
             # })
             
-            # Save best model
-            if J2J_loss < best_loss:
-                best_loss = J2J_loss
+            if avg_J2J < best_loss:
+                best_loss = avg_J2J
                 model_path = os.path.join(args.output_dir, 'best_model.pkl')
                 model.save(model_path)
-                log_message(f"Saved best model with loss {best_loss:.4f} to {model_path}")
-                no_improve_epochs = 0  # Reset counter
+                log_message(f"Saved best model with smoothed loss {best_loss:.4f} to {model_path}")
+                no_improve_epochs = 0
             else:
                 no_improve_epochs += 1
                 if no_improve_epochs >= args.patience:
-                    log_message(f"Early stopping triggered after {epoch+1} epochs")
+                    log_message(f"Early stopping triggered after {epoch+1} epochs with smoothed loss {avg_J2J:.4f}")
                     break
         
         # Save checkpoint

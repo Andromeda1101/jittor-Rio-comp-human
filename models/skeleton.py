@@ -48,6 +48,7 @@ from PCT.networks.cls.enhancedpct import EnhancedPointTransformer
 
 class EnhancedSkeletonModel(nn.Module):
     def __init__(self, feat_dim: int, output_channels: int):
+
         super().__init__()
         self.feat_dim = feat_dim
         self.output_channels = output_channels

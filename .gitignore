@@ -195,3 +195,4 @@ jsparse/
 output**/
 predict**/
 **/**/**/*.npy
+*.gz
