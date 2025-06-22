@@ -19,7 +19,7 @@ from models.unified import UnifiedModel, EnhancedBoneConstraints  # 使用增强
 from dataset.exporter import Exporter
 
 # Set Jittor flags
-jt.flags.use_cuda = 0
+jt.flags.use_cuda = 1
 
 # 姿势感知的数据增强
 # def pose_aware_augmentation(vertices, joints, skin):
