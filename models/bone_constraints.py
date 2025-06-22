@@ -58,8 +58,8 @@ class BoneConstraints:
             13: (0.0, 0.15),   # r_hand
             
             # 髋部 - 限制在合适的角度范围
-            14: (1.0, 1.4),    # l_upper_leg
-            18: (1.0, 1.4),    # r_upper_leg
+            14: (1.6, 2.0),    # l_upper_leg
+            18: (1.6, 2.0),    # r_upper_leg
             
             # 腿部 - 保持近似平行
             15: (0.0, 0.2),    # l_lower_leg
@@ -382,7 +382,7 @@ class BoneConstraints:
         
         # 更新总损失计算，增加新约束的权重
         total_loss = (length_loss + 
-                     2.5 * angle_loss +          # 增加角度约束权重
+                     5 * angle_loss +          # 增加角度约束权重
                      1.5 * chain_loss + 
                      2.0 * symmetry_loss + 
                      1.0 * collinear_loss +

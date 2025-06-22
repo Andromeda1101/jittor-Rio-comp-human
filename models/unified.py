@@ -6,7 +6,6 @@ from dataset.format import parents
 from PCT.networks.cls.unifiedpct import UnifiedPointTransformer
 from PCT.networks.cls.pct import Point_Transformer2
 from .bone_constraints import BoneConstraints
-from .skin_constraints import SkinConstraints
 
 class UnifiedModel(nn.Module):
     def __init__(self, feat_dim=256, num_joints=22, transformer_name='unified'):
@@ -64,35 +63,21 @@ class UnifiedModel(nn.Module):
             MultiheadAttention(feat_dim, num_heads=8, batch_first=True)
         ])
         
-        # 修改蒙皮预测分支，添加空间感知
+        # 简化的蒙皮预测分支
         self.skin_predictor = nn.Sequential(
-            SpatialAwareModule(feat_dim * 4, feat_dim * 2),
-            nn.BatchNorm1d(feat_dim * 2),
+            nn.Linear(feat_dim * 2, feat_dim),
+            nn.BatchNorm1d(feat_dim),
             nn.ReLU(),
-            LocalityConstrainedPredictor(feat_dim * 2, feat_dim * 2, num_joints),
-            nn.BatchNorm1d(feat_dim * 2),
-            nn.ReLU(),
-            nn.Conv1d(feat_dim * 2, num_joints, 1),
-            nn.Softplus()  # 确保输出非负
+            nn.Linear(feat_dim, num_joints),
+            nn.Softmax(dim=1)  # 确保权重和为1
         )
         
-        # 添加距离阈值参数
-        self.distance_threshold = 0.3  # 可调整的距离阈值
-        
-        # 新增：自适应加权融合模块
-        self.fusion_weights = nn.Parameter(jt.ones(4))  # 4个注意力输出的权重
-        
-        # 添加蒙皮约束
-        self.skin_constraints = SkinConstraints()
-        
-        # 添加约束网络
+        # 保留其他必要组件
+        self.fusion_weights = nn.Parameter(jt.ones(4))
         self.constraint_net = ConstraintNetwork(feat_dim, num_joints)
-        
-        # 调整损失权重
         self.constraint_weights = {
             'symmetry': 1.0,
-            'planarity': 0.8,
-            'chain': 1.2
+            'planarity': 0.8
         }
     
     def _make_res_block(self, in_dim, hidden_dim, out_dim):
@@ -119,100 +104,42 @@ class UnifiedModel(nn.Module):
         joint_pred = self.joint_predictor(multi_scale_features)
         joint_pred = joint_pred.view(-1, self.num_joints, 3)
         
-        # 约束网络处理
+        # 约束网络处理 - 移除距离相关约束
         B, _, N = vertices.shape
         constraint_input = jt.concat([
             shape_latent,
-            joint_pred.reshape(B, -1)  # 展平关节预测
+            joint_pred.reshape(B, -1)
         ], dim=1)
         
         constraint_feat = self.constraint_net.constraint_encoder(constraint_input)
         
-        # 预测各类约束调整
+        # 只保留基本的形状约束
         symmetry_adjust = self.constraint_net.symmetry_predictor(constraint_feat)
         planarity_adjust = self.constraint_net.planarity_predictor(constraint_feat)
-        chain_adjust = self.constraint_net.chain_predictor(constraint_feat)
         
         # 将调整reshape为关节形状
         symmetry_adjust = symmetry_adjust.view(B, self.num_joints, 3)
         planarity_adjust = planarity_adjust.view(B, self.num_joints, 3)
-        chain_adjust = chain_adjust.view(B, self.num_joints, 3)
         
-        # 应用约束调整
+        # 简化的约束调整
         joint_adjust = (
             self.constraint_weights['symmetry'] * symmetry_adjust +
-            self.constraint_weights['planarity'] * planarity_adjust +
-            self.constraint_weights['chain'] * chain_adjust
+            self.constraint_weights['planarity'] * planarity_adjust
         )
         
         # 软约束：通过残差连接应用调整
-        joint_pred = joint_pred + 0.1 * joint_adjust  # 使用小权重确保平滑调整
+        joint_pred = joint_pred + 0.1 * joint_adjust
         
-        # 蒙皮特征准备
+        # 简化的蒙皮预测
         vertices_flat = vertices.permute(0, 2, 1).reshape(B * N, 3)
         shape_latent_exp = shape_latent.unsqueeze(1).repeat(1, N, 1).reshape(B * N, -1)
         
-        # 顶点特征增强
-        vertex_feat = self.vertex_encoder(concat([vertices_flat, shape_latent_exp], dim=1))
-        vertex_feat = vertex_feat.view(B, N, -1)
+        # 简单连接特征
+        fusion_feat = concat([vertices_flat, shape_latent_exp], dim=1)
         
-        # 多尺度骨骼特征
-        joint_feats = []
-        for feat_extractor in self.joint_features:
-            feat = feat_extractor(joint_pred.reshape(B * self.num_joints, 3))
-            joint_feats.append(feat.view(B, self.num_joints, -1))
-        joint_feat = concat(joint_feats, dim=-1)  # B, J, feat_dim
-        
-        # 层次化注意力交互
-        att_output1, _ = self.cross_attentions[0](vertex_feat, joint_feat, joint_feat)
-        att_output2, _ = self.cross_attentions[1](att_output1, joint_feat, joint_feat)
-        att_output3, _ = self.cross_attentions[2](att_output2, joint_feat, joint_feat)
-
-        # 使用softmax归一化融合权重
-        fusion_weights = nn.softmax(self.fusion_weights)
-        
-        # 确保所有特征具有相同的维度
-        vertex_feat_adj = vertex_feat * fusion_weights[0]
-        att_output1_adj = att_output1 * fusion_weights[1]
-        att_output2_adj = att_output2 * fusion_weights[2]
-        att_output3_adj = att_output3 * fusion_weights[3]
-        
-        # 加权融合特征
-        fusion_feat = concat([
-            vertex_feat_adj,
-            att_output1_adj,
-            att_output2_adj,
-            att_output3_adj
-        ], dim=-1)  # (B, N, feat_dim*3)
-        
-        # 调整维度以适应Conv1d
-        fusion_feat = fusion_feat.permute(0, 2, 1)  # (B, feat_dim*3, N)
-        
-        # 计算每个顶点到关节的距离
-        vertices_3d = vertices.permute(0, 2, 1)  # [B, N, 3]
-        joints_3d = joint_pred  # [B, J, 3]
-        
-        # 计算距离矩阵：[B, N, J]
-        distances = jt.norm(
-            vertices_3d.unsqueeze(2) - joints_3d.unsqueeze(1),
-            dim=-1
-        )
-        
-        # 创建距离掩码
-        distance_mask = jt.exp(-distances * 5.0)  # 软化的距离掩码
-        
-        # 预测蒙皮权重
-        skin_logits = self.skin_predictor(fusion_feat)  # [B, J, N]
-        
-        # 计算距离权重
-        distance_weights = self.skin_constraints.compute_distance_weights(vertices_3d, joint_pred)
-        
-        # 使用Softmax并应用距离掩码
-        skin_weights = nn.softmax(skin_logits * 5.0, dim=1)  # 添加温度系数
-        skin_weights = skin_weights * distance_weights.permute(0, 2, 1)
-        skin_weights = skin_weights / (skin_weights.sum(dim=1, keepdim=True) + 1e-6)
-        
-        skin_weights = skin_weights.permute(0, 2, 1)  # [B, N, J]
+        # 直接预测蒙皮权重
+        skin_weights = self.skin_predictor(fusion_feat)
+        skin_weights = skin_weights.reshape(B, N, -1)  # [B, N, J]
         
         return joint_pred, skin_weights
     
@@ -353,40 +280,6 @@ class HierarchicalJointPredictor(nn.Module):
             
         return jt.stack(joint_positions, dim=1)  # [B, num_joints, 3]
 
-# 新增空间感知模块
-class SpatialAwareModule(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, 1)
-        self.spatial_gate = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, 1),
-            nn.Sigmoid()
-        )
-        
-    def execute(self, x):
-        feat = self.conv(x)
-        gate = self.spatial_gate(x)
-        return feat * gate
-
-# 新增局部约束预测器
-class LocalityConstrainedPredictor(nn.Module):
-    def __init__(self, in_channels, out_channels, num_joints, k=3):
-        super().__init__()
-        self.k = k
-        self.conv1 = nn.Conv1d(in_channels, out_channels, 1)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, 1)
-        
-    def execute(self, x):
-        # 提取局部特征
-        B, C, N = x.shape
-        
-        # 使用1x1卷积进行特征变换
-        feat = self.conv1(x)
-        feat = nn.relu(feat)
-        feat = self.conv2(feat)
-        
-        return feat
-
 # 新增约束网络
 class ConstraintNetwork(nn.Module):
     def __init__(self, feat_dim=256, num_joints=22):
@@ -405,4 +298,3 @@ class ConstraintNetwork(nn.Module):
         # 各部分约束预测器
         self.symmetry_predictor = nn.Linear(256, num_joints * 3)
         self.planarity_predictor = nn.Linear(256, num_joints * 3)
-        self.chain_predictor = nn.Linear(256, num_joints * 3)
